@@ -111,6 +111,10 @@ DATASETS = {
         "ann": os.path.join(BASE, "cplfw_ann.txt"),
         "img_dir": BASE,
     },
+        "AgeDB-30": {
+        "ann": os.path.join(BASE, "agedb_30_ann.txt"),
+        "img_dir": BASE,
+    },
 }
 
 # -- Run evaluation ---------------------------------------------------
