@@ -1,11 +1,13 @@
 """
 eval_utils.py
 ─────────────────────────────────────────────────────────────────────────────
-Shared building blocks used by both eval_real.py and eval_synth.py:
+Shared building blocks used by eval_real.py, eval_synth.py and generate_ann.py:
+  - parse_ann       (annotation file parser)
   - PairDataset
+  - make_transform
   - extract_embeddings
   - eval_10fold
-  - append_to_csv  (per-pair detail log)
+  - append_to_detail_csv   (per-pair detail log)
   - append_to_summary_csv  (one row per model × dataset)
 """
 
@@ -22,6 +24,22 @@ from torchvision import transforms
 
 BATCH_SIZE  = 64
 NUM_WORKERS = 4
+
+# ── Annotation parser ─────────────────────────────────────────────────────────
+
+def parse_ann(ann_txt: Path) -> list[tuple[str, str, int]]:
+    """
+    Load an annotation file (format: label img1_path img2_path).
+    Returns list of (img1_path, img2_path, label).
+    """
+    pairs = []
+    with open(ann_txt) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) == 3:
+                label, p1, p2 = parts
+                pairs.append((p1, p2, int(label)))
+    return pairs
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
 
@@ -71,13 +89,16 @@ def extract_embeddings(
     for img1, img2, label in loader:
         out1 = model(img1.to(device))
         out2 = model(img2.to(device))
-        # SwinFace returns a dict of 43 outputs — "Recognition" is the face embedding.
-        # With set_output_type("Recognition") in load_model.py this should already be
-        # a tensor, but the guard is kept as a safety net for any other dict-returning model.
+        # SwinFace returns a dict  → extract "Recognition" embedding
+        # TransFace and some ViTs return a tuple → embedding is index 0
         if isinstance(out1, dict):
             out1 = out1["Recognition"]
+        elif isinstance(out1, tuple):
+            out1 = out1[0]
         if isinstance(out2, dict):
             out2 = out2["Recognition"]
+        elif isinstance(out2, tuple):
+            out2 = out2[0]
         e1_list.append(F.normalize(out1, dim=1).cpu())
         e2_list.append(F.normalize(out2, dim=1).cpu())
         labels.extend(label.tolist())

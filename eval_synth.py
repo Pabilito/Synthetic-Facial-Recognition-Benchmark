@@ -25,16 +25,16 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from data.synth.synth_utils import SYNTH_ROOT, parse_ann
 from load_model import list_model_specs, load_model_by_spec, release_model, ModelBundle
 from eval_utils import (
-    PairDataset, make_transform, extract_embeddings, eval_10fold,
+    parse_ann, PairDataset, make_transform, extract_embeddings, eval_10fold,
     append_to_detail_csv, append_to_summary_csv, BATCH_SIZE, NUM_WORKERS,
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR  = Path(__file__).parent
+SYNTH_ROOT  = SCRIPT_DIR / "data" / "synth"
 MODEL_DIR   = SCRIPT_DIR / "Pretrained_Models"
 EVAL_DIR    = SCRIPT_DIR / "Evaluation"
 DETAIL_CSV  = EVAL_DIR / "synth_detail.csv"

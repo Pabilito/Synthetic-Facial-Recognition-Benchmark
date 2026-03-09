@@ -61,4 +61,10 @@ and overal results to:
 - *Evaluation/synth_summary.csv* 
 - *Evaluation/real_summary.csv*
 
+## Demographic Analysis
 
+We use predictors from [DeepFace](https://github.com/serengil/deepface) to estimate age and gender of each dataset identity.
+
+~~~
+python Dataset_Demographic_Analysis/demographic_analysis.py
+~~~

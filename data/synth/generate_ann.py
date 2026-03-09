@@ -38,11 +38,21 @@ Usage
 
 import argparse
 import random
+import sys
 from pathlib import Path
 
-from synth_utils import (
-    SYNTH_ROOT, N_PAIRS, SEED, IMG_EXTS, parse_ann,
-)
+# Allow imports from the project root (two levels up from data/synth/)
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from eval_utils import parse_ann
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR = Path(__file__).parent
+SYNTH_ROOT = SCRIPT_DIR / "data" / "synth"
+N_PAIRS    = 6000   # must be divisible by 10 for clean 10-fold split
+SEED       = 42
+IMG_EXTS   = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
 
 # ── File-system helpers ───────────────────────────────────────────────────────
 

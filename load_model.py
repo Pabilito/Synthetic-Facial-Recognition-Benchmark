@@ -73,10 +73,8 @@ _HW   = 112   # default height = width
 EDGEFACE_VARIANTS = [
     "edgeface_base",
     "edgeface_s_gamma_05",
-    "edgeface_xs_q",
     "edgeface_xs_gamma_06",
     "edgeface_xxs",
-    "edgeface_xxs_q",
 ]
 
 # Library model names (no local file required)

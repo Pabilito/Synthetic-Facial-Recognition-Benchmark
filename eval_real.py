@@ -45,7 +45,7 @@ import torch
 
 from load_model import list_model_specs, load_model_by_spec, release_model, ModelBundle
 from eval_utils import (
-    PairDataset, make_transform, extract_embeddings, eval_10fold,
+    parse_ann, PairDataset, make_transform, extract_embeddings, eval_10fold,
     append_to_detail_csv, append_to_summary_csv, BATCH_SIZE, NUM_WORKERS,
 )
 
@@ -66,19 +66,6 @@ DATASETS: dict[str, Path] = {
     "CPLFW":    VAL_DIR / "cplfw_ann.txt",
     "AgeDB-30": VAL_DIR / "agedb_30_ann.txt",
 }
-
-
-# ── Annotation parser ─────────────────────────────────────────────────────────
-
-def parse_ann(ann_txt: Path) -> list[tuple[str, str, int]]:
-    pairs = []
-    with open(ann_txt) as f:
-        for line in f:
-            parts = line.strip().split()
-            if len(parts) == 3:
-                label, p1, p2 = parts
-                pairs.append((p1, p2, int(label)))
-    return pairs
 
 
 # ── Single model × dataset evaluation ────────────────────────────────────────
