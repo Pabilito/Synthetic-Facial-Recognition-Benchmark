@@ -1,6 +1,6 @@
 # Synthetic Facial Recognition Benchmark
 
-TBD
+Reproduction package for TBD
 
 
 ## Real Datasets Installation 
@@ -15,7 +15,21 @@ unzip ~/Downloads/agedb-30-calfw-cplfw-lfw-aligned-112x112.zip -d ~/data/face_da
 
 ## Synthetic Datasets Installation 
 
-Acquire synthetic datasets from their respective owners (sometimes it is a simple download, sometimes you need a permission) and extract them:
+Acquire synthetic datasets from their respective owners (sometimes it is a simple download, sometimes you need a permission): 
+- [SFace and SFace2](https://github.com/fdbtrs/SFace-Privacy-friendly-and-Accurate-Face-Recognition-using-Synthetic-Data?tab=readme-ov-file)
+- [CemiFace](https://github.com/szlbiubiubiu/CemiFace)
+- [DCFace](https://github.com/mk-minchul/dcface)
+- [Vec2Face](https://github.com/HaiyuWu/Vec2Face)
+- [IDiff-Face](https://github.com/fdbtrs/IDiff-Face)
+- [ControlFace10k](https://huggingface.co/datasets/HuMInGameLab/ControlFace10K)
+- [HyperFace](https://www.idiap.ch/paper/hyperface/)
+- [Digi2Real](https://www.idiap.ch/paper/digi2real/)
+- [LangevinDisco](https://www.idiap.ch/paper/synthetics-disco/)
+- [SynFace](https://github.com/haibo-qiu/SynFace)
+- [SynMulti-PIE](https://www.idiap.ch/en/scientific-research/data/synmultipie)
+- MorphFace - contact authors
+
+and extract them:
 
 ~~~
 # You can preview structure of the files with preview.sh script. 
@@ -68,3 +82,14 @@ We use predictors from [DeepFace](https://github.com/serengil/deepface) to estim
 ~~~
 python Dataset_Demographic_Analysis/demographic_analysis.py
 ~~~
+
+## Correlation Analysis
+~~~
+python eval_correlation.py
+~~~
+
+Outputs: 
+
+- *Evaluation/correlation_all_datasets.png*
+- *Evaluation/correlation_heatmap.png*
+- *Evaluation/dataset_correlations.csv*
