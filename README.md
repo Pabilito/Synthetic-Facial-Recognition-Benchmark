@@ -85,11 +85,14 @@ python Dataset_Demographic_Analysis/demographic_analysis.py
 
 ## Correlation Analysis
 ~~~
+# Aggregated evaluation
 python eval_correlation.py
+# Split by models trained only on real/synthetic data
+python eval_correlation_by_model_type.py
 ~~~
 
 Outputs: 
 
-- *Evaluation/correlation_all_datasets.png*
-- *Evaluation/correlation_heatmap.png*
-- *Evaluation/dataset_correlations.csv*
+- *Evaluation/correlation_all_datasets[_real|_synth].png*
+- *Evaluation/correlation_heatmap[_real|_synth].png*
+- *Evaluation/dataset_correlations[_real|_synth].csv*

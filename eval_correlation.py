@@ -1,17 +1,16 @@
 """
 eval_correlation.py
 ─────────────────────────────────────────────────────────────────────────────
-Reads Evaluation/real_summary.csv and Evaluation/synth_summary.csv and plots
-correlations between model accuracies for ALL dataset pairs.
+Reads Evaluation/real_summary.csv and Evaluation/synth_summary.csv and:
 
-Each panel shows:
-  - One point per model
-  - Pearson r and p-value
-  - Error bars
-  - Linear regression line
+1. Plots scatter correlations between all dataset pairs
+2. Generates a correlation heatmap (real datasets first, synthetic second)
+3. Saves correlation statistics (r, p, n_models)
 
-Output:
-Evaluation/correlation_all_datasets.png
+Outputs:
+  correlation_all_datasets.png
+  correlation_heatmap.png
+  dataset_correlations.csv
 """
 
 import sys
@@ -23,6 +22,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
@@ -31,14 +31,17 @@ EVAL_DIR = SCRIPT_DIR / "Evaluation"
 REAL_CSV = EVAL_DIR / "real_summary.csv"
 SYNTH_CSV = EVAL_DIR / "synth_summary.csv"
 
-OUT_FIG = EVAL_DIR / "correlation_all_datasets.png"
+OUT_SCATTER = EVAL_DIR / "correlation_all_datasets.png"
+OUT_HEATMAP = EVAL_DIR / "correlation_heatmap.png"
+OUT_STATS = EVAL_DIR / "dataset_correlations.csv"
 
 CMAP = plt.get_cmap("tab20")
 
+
 # ── Load helper ───────────────────────────────────────────────────────────────
 
+def load(path: Path, label: str):
 
-def load(path: Path, label: str) -> pd.DataFrame:
     if not path.exists():
         print(f"[ERROR] {label} not found: {path}")
         sys.exit(1)
@@ -53,8 +56,8 @@ def load(path: Path, label: str) -> pd.DataFrame:
 
 # ── Regression helper ─────────────────────────────────────────────────────────
 
-
 def regression_line(x, y):
+
     mask = np.isfinite(x) & np.isfinite(y)
 
     if mask.sum() < 3:
@@ -68,8 +71,7 @@ def regression_line(x, y):
     return x_line, y_line, r, p
 
 
-# ── Plot helper ───────────────────────────────────────────────────────────────
-
+# ── Scatter plot panel ─────────────────────────────────────────────────────────
 
 def plot_panel(ax, merged, ds_x, ds_y, model_colors):
 
@@ -95,9 +97,12 @@ def plot_panel(ax, merged, ds_x, ds_y, model_colors):
 
     res = regression_line(x, y)
 
+    r_val = np.nan
+    p_val = np.nan
+
     if res:
 
-        x_line, y_line, r, p = res
+        x_line, y_line, r_val, p_val = res
 
         ax.plot(
             x_line,
@@ -108,10 +113,10 @@ def plot_panel(ax, merged, ds_x, ds_y, model_colors):
             alpha=0.6,
         )
 
-        p_str = f"p={p:.3f}" if p >= 0.001 else "p<0.001"
+        p_str = f"p={p_val:.3f}" if p_val >= 0.001 else "p<0.001"
 
         ax.annotate(
-            f"r={r:.3f}  {p_str}",
+            f"r={r_val:.3f}  {p_str}",
             xy=(0.05, 0.93),
             xycoords="axes fraction",
             fontsize=8,
@@ -121,7 +126,7 @@ def plot_panel(ax, merged, ds_x, ds_y, model_colors):
     ax.set_xlabel(f"{ds_x} accuracy (%)", fontsize=8)
     ax.set_ylabel(f"{ds_y} accuracy (%)", fontsize=8)
 
-    ax.set_title(f"{ds_x}  ↔  {ds_y}", fontsize=9, fontweight="bold")
+    ax.set_title(f"{ds_x} ↔ {ds_y}", fontsize=9, fontweight="bold")
 
     ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
     ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
@@ -129,9 +134,60 @@ def plot_panel(ax, merged, ds_x, ds_y, model_colors):
     ax.tick_params(labelsize=7)
     ax.grid(True, linestyle=":", alpha=0.4)
 
+    return r_val, p_val
+
+
+# ── Heatmap ───────────────────────────────────────────────────────────────────
+
+def plot_heatmap(results_df, datasets, split_index):
+
+    r_matrix = (
+        results_df
+        .pivot(index="dataset_x", columns="dataset_y", values="r")
+        .reindex(index=datasets, columns=datasets)
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    im = ax.imshow(r_matrix, vmin=-1, vmax=1)
+
+    ax.set_xticks(range(len(datasets)))
+    ax.set_yticks(range(len(datasets)))
+
+    ax.set_xticklabels(datasets, rotation=45, ha="right")
+    ax.set_yticklabels(datasets)
+
+    ax.set_title("Dataset Correlation Heatmap (Pearson r)", fontsize=12)
+
+    for i in range(len(datasets)):
+        for j in range(len(datasets)):
+
+            val = r_matrix.iloc[i, j]
+
+            if np.isfinite(val):
+                ax.text(
+                    j,
+                    i,
+                    f"{val:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                )
+
+    # separator between real and synthetic datasets
+    ax.axhline(split_index - 0.5, color="black", linewidth=1.5)
+    ax.axvline(split_index - 0.5, color="black", linewidth=1.5)
+
+    fig.colorbar(im, ax=ax, label="Pearson r")
+
+    fig.tight_layout()
+
+    fig.savefig(OUT_HEATMAP, dpi=500)
+
+    print(f"Saved heatmap → {OUT_HEATMAP}")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-
 
 def main():
 
@@ -139,32 +195,32 @@ def main():
     synth_df = load(SYNTH_CSV, "synth_summary.csv")
 
     real_df["source"] = "real"
-    synth_df["source"] = "synth"
+    synth_df["source"] = "synthetic"
 
     all_df = pd.concat([real_df, synth_df], ignore_index=True)
 
-    datasets = sorted(all_df["dataset"].unique())
+    real_datasets = sorted(real_df["dataset"].unique())
+    synth_datasets = sorted(synth_df["dataset"].unique())
 
-    all_models = sorted(all_df["model"].unique())
+    datasets = real_datasets + synth_datasets
 
-    print(f"Datasets : {datasets}")
-    print(f"Models   : {all_models}")
+    models = sorted(all_df["model"].unique())
+
+    print("Real datasets:", real_datasets)
+    print("Synthetic datasets:", synth_datasets)
+    print("Models:", models)
 
     model_colors = {
-        m: CMAP(i / max(len(all_models) - 1, 1)) for i, m in enumerate(all_models)
+        m: CMAP(i / max(len(models) - 1, 1))
+        for i, m in enumerate(models)
     }
 
-    n_rows = len(datasets)
-    n_cols = len(datasets)
-
-    if n_rows == 0:
-        print("[ERROR] No datasets found.")
-        sys.exit(1)
+    n = len(datasets)
 
     fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(4.5 * n_cols, 4.0 * n_rows),
+        n,
+        n,
+        figsize=(4.5 * n, 4 * n),
         squeeze=False,
     )
 
@@ -174,6 +230,8 @@ def main():
         fontweight="bold",
         y=1.02,
     )
+
+    results = []
 
     for r_idx, ds_x in enumerate(datasets):
 
@@ -204,11 +262,26 @@ def main():
                     color="grey",
                 )
 
-                ax.set_title(f"{ds_x} ↔ {ds_y}", fontsize=9)
+                r_val = np.nan
+                p_val = np.nan
 
-                continue
+            else:
 
-            plot_panel(ax, merged, ds_x, ds_y, model_colors)
+                r_val, p_val = plot_panel(
+                    ax,
+                    merged,
+                    ds_x,
+                    ds_y,
+                    model_colors
+                )
+
+            results.append({
+                "dataset_x": ds_x,
+                "dataset_y": ds_y,
+                "r": r_val,
+                "p": p_val,
+                "n_models": len(merged)
+            })
 
     handles = [
         plt.Line2D(
@@ -220,14 +293,14 @@ def main():
             markersize=7,
             label=m,
         )
-        for m in all_models
+        for m in models
     ]
 
     fig.legend(
         handles=handles,
         title="Model",
         loc="lower center",
-        ncol=min(len(all_models), 4),
+        ncol=min(len(models), 4),
         fontsize=8,
         title_fontsize=9,
         bbox_to_anchor=(0.5, -0.03),
@@ -235,11 +308,21 @@ def main():
 
     fig.tight_layout()
 
-    OUT_FIG.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(OUT_SCATTER, dpi=500, bbox_inches="tight")
 
-    fig.savefig(OUT_FIG, dpi=150, bbox_inches="tight")
+    print(f"Saved scatter plots → {OUT_SCATTER}")
 
-    print(f"\nSaved → {OUT_FIG}")
+    results_df = pd.DataFrame(results)
+
+    results_df.to_csv(OUT_STATS, index=False)
+
+    print(f"Saved statistics → {OUT_STATS}")
+
+    plot_heatmap(
+        results_df,
+        datasets,
+        split_index=len(real_datasets)
+    )
 
 
 if __name__ == "__main__":
