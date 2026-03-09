@@ -2,7 +2,6 @@
 
 Reproduction package for TBD
 
-
 ## Real Datasets Installation 
 
 You can download LFW, CPLFW, CALFW and AgeDB-30 from kaggle:
@@ -59,6 +58,17 @@ Generate DATASETNAME_ann.txt files with mated and non-mated pairs for evaluation
 python data/synth/generate_ann.py
 ~~~
 
+## Pretrained Models
+
+Models trained on real data: 
+- IResNet models are taken from [InsightFace](https://github.com/deepinsight/insightface/tree/master/model_zoo)
+- EdgeFace and InceptionResnetV1 are loaded from libraries
+
+Models trained on synthetic data:
+- [SFace and SFace2](https://github.com/fdbtrs/SFace-Privacy-friendly-and-Accurate-Face-Recognition-using-Synthetic-Data?tab=readme-ov-file)
+- [IDiff-Face](https://github.com/fdbtrs/IDiff-Face)
+- Vec2Face, Langevin-Disco, Langevin-Dispersion and HyperFace are loaded from HuggingFace
+
 ## Evaluation
 
 To use real/synthetic datasets as benchmarks run: 
@@ -89,6 +99,8 @@ python Dataset_Demographic_Analysis/demographic_analysis.py
 python eval_correlation.py
 # Split by models trained only on real/synthetic data
 python eval_correlation_by_model_type.py
+# Confidence intervals
+python -u eval_correlation_ci.py
 ~~~
 
 Outputs: 
@@ -96,3 +108,6 @@ Outputs:
 - *Evaluation/correlation_all_datasets[_real|_synth].png*
 - *Evaluation/correlation_heatmap[_real|_synth].png*
 - *Evaluation/dataset_correlations[_real|_synth].csv*
+
+TODO:
+Find correct links for hyperface and langevins

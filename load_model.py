@@ -25,6 +25,29 @@ Supported models
     InceptionResnetV1_VGG    (facenet_pytorch, pretrained on VGGFace2)
     InceptionResnetV1_CASIA  (facenet_pytorch, pretrained on CASIA-WebFace)
 
+  From HuggingFace (auto-downloaded on first use):
+    hsface10k            (IResNet-50 + channel-attn, Vec2Face/HSFace, BooBooWu/Vec2Face)
+    hsface300k           (IResNet-50 + channel-attn, Vec2Face/HSFace, BooBooWu/Vec2Face)
+    hyperface_50k_stylegan   (IResNet-50, HyperFace,           Idiap/HyperFace-50k-StyleGAN)
+    langevin_disco_30k       (IResNet-50, Langevin-DisCo,      Idiap/Langevin-DisCo-30k)
+    langevin_dispersion_10k  (IResNet-50, Langevin-Dispersion, Idiap/Langevin-Dispersion-10k)
+
+Notes on Idiap Lightning checkpoints (HyperFace / Langevin family)
+──────────────────────────────────────────────────────────────────
+  All three Idiap models share the same checkpoint format and inference
+  convention, so a single loader (_load_hyperface) handles all of them:
+
+  • Checkpoint format: PyTorch Lightning .ckpt (weights_only=False required).
+    Weights live under ckpt["state_dict"] with keys prefixed by "model." —
+    this loader strips that prefix before calling iresnet50.load_state_dict().
+
+  • Output: the IResNet forward() returns a tuple (embedding, norm).
+    _HyperFaceWrapper unpacks it so every ModelBundle returns a plain tensor.
+
+  • Input colour: BGR (InsightFace convention).  _HyperFaceWrapper flips
+    channels RGB→BGR transparently, so callers use the same RGB pipeline
+    as every other model in this file.
+
 Usage
 ─────
   from load_model import load_all_models, LIBRARY_MODELS
@@ -46,6 +69,7 @@ import torch
 import torch.nn as nn
 
 import Pretrained_Models.iresnet as iresnet
+import Pretrained_Models.iresnet_attn as iresnet_attn
 import Pretrained_Models.vit_face as vit
 import Pretrained_Models.vit_trans as trans
 from Pretrained_Models import swin_subnets
@@ -77,8 +101,40 @@ EDGEFACE_VARIANTS = [
     "edgeface_xxs",
 ]
 
-# Library model names (no local file required)
-LIBRARY_MODELS = EDGEFACE_VARIANTS + ["InceptionResnetV1_VGG", "InceptionResnetV1_CASIA"]
+# HSFace models available on HuggingFace (BooBooWu/Vec2Face).
+# All are IResNet-50 weights trained with ArcFace on synthetic HSFace datasets.
+HSFACE_VARIANTS = [
+    "hsface10k",
+    "hsface300k",
+]
+
+# HyperFace / Langevin models available on HuggingFace (Idiap/*).
+# IResNet-50 weights stored as PyTorch Lightning .ckpt checkpoints.
+# Filenames confirmed from the repo file listings; see _HYPERFACE_REPO.
+HYPERFACE_VARIANTS = [
+    "hyperface_50k_stylegan",   # Idiap/HyperFace-50k-StyleGAN
+    "langevin_disco_30k",       # Idiap/Langevin-DisCo-30k
+    "langevin_dispersion_10k",  # Idiap/Langevin-Dispersion-10k
+]
+
+# Mapping from our canonical name → (HuggingFace repo id, filename on hub).
+# Filenames confirmed directly from the repo file listings:
+#   https://huggingface.co/Idiap/HyperFace-50k-StyleGAN/blob/main/HyperFace_50k_StyleGAN.ckpt
+#   https://huggingface.co/Idiap/Langevin-DisCo-30k/blob/main/Langevin-DisCo-30k.ckpt
+#   https://huggingface.co/Idiap/Langevin-Dispersion-10k/blob/main/Langevin-Dispersion-10k.ckpt
+_HYPERFACE_REPO = {
+    "hyperface_50k_stylegan":  ("Idiap/HyperFace-50k-StyleGAN",  "HyperFace_50k_StyleGAN.ckpt"),
+    "langevin_disco_30k":      ("Idiap/Langevin-DisCo-30k",      "Langevin-DisCo-30k.ckpt"),
+    "langevin_dispersion_10k": ("Idiap/Langevin-Dispersion-10k", "Langevin-Dispersion-10k.ckpt"),
+}
+
+
+LIBRARY_MODELS = (
+    EDGEFACE_VARIANTS
+    + HSFACE_VARIANTS
+    + HYPERFACE_VARIANTS
+    + ["InceptionResnetV1_VGG", "InceptionResnetV1_CASIA"]
+)
 
 # ── Individual loaders ────────────────────────────────────────────────────────
 
@@ -100,6 +156,103 @@ def _load_facenet(
     print(f"[LOADED] {name}")
     # FaceNet expects 160×160
     return ModelBundle(model, name, 160, 160, _MEAN, _STD)
+
+
+def _load_hsface(variant: str, device: torch.device) -> ModelBundle:
+    """
+    Load an HSFace FR model (IResNet-50 + ArcFace) from HuggingFace.
+
+    Weights are hosted at:
+        https://huggingface.co/BooBooWu/Vec2Face  (fr_weights/<variant>.pth)
+
+    huggingface_hub caches the file locally on first download, so subsequent
+    calls are instant.  The file name on the hub is e.g. "fr_weights/hsface10k.pth".
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise ImportError(
+            "huggingface_hub is required to load HSFace models. "
+            "Install it with:  pip install huggingface_hub"
+        ) from exc
+
+    hub_filename = f"fr_weights/{variant}.pth"
+    local_path = hf_hub_download(
+        repo_id="BooBooWu/Vec2Face",
+        filename=hub_filename,
+    )
+    # HSFace models use an attention-augmented IResNet-50 (see Pretrained_Models/iresnet_attn.py)
+    model = iresnet_attn.iresnet50_attn()
+    state = torch.load(local_path, map_location=device, weights_only=True)
+    model.load_state_dict(state, strict=True)
+    model.to(device).eval()
+    print(f"[LOADED] {variant}")
+    return ModelBundle(model, variant, _HW, _HW, _MEAN, _STD)
+
+
+class _HyperFaceWrapper(nn.Module):
+    """
+    Thin wrapper around an IResNet that:
+      1. Flips channels RGB→BGR before the forward pass (HyperFace was
+         trained with InsightFace's BGR convention).
+      2. Unpacks the tuple output (embedding, _) so callers receive a
+         plain embedding tensor, consistent with every other ModelBundle.
+    """
+    def __init__(self, backbone: nn.Module) -> None:
+        super().__init__()
+        self.backbone = backbone
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x is expected in RGB order; flip to BGR for HyperFace
+        x_bgr = x[:, [2, 1, 0], :, :]
+        out = self.backbone(x_bgr)
+        # IResNet used by HyperFace returns (embedding, norm) tuple
+        if isinstance(out, (tuple, list)):
+            return out[0]
+        return out
+
+
+def _load_hyperface(variant: str, device: torch.device) -> ModelBundle:
+    """
+    Load a HyperFace / Langevin FR model (IResNet-50) from HuggingFace.
+
+    The checkpoint is a PyTorch Lightning .ckpt file.  Lightning saves weights
+    under the "state_dict" key with all parameter names prefixed by "model.".
+    This loader strips that prefix and loads into a plain iresnet50() instance,
+    then wraps it with _HyperFaceWrapper to normalise the output interface and
+    handle BGR↔RGB conversion.
+
+    The exact filename on the hub is confirmed from the repo file listings
+    and stored in _HYPERFACE_REPO — no runtime discovery needed.
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:
+        raise ImportError(
+            "huggingface_hub is required to load HyperFace/Langevin models. "
+            "Install it with:  pip install huggingface_hub"
+        ) from exc
+
+    repo_id, hub_filename = _HYPERFACE_REPO[variant]
+    local_path = hf_hub_download(repo_id=repo_id, filename=hub_filename)
+
+    # Lightning checkpoint: weights_only=False because the file is a pickled
+    # dict (not a plain state-dict tensor file).
+    ckpt = torch.load(local_path, map_location=device, weights_only=False)
+    raw_state = ckpt["state_dict"]
+
+    # Strip the "model." prefix added by the LightningModule wrapper
+    state = {
+        k[len("model."):]: v
+        for k, v in raw_state.items()
+        if k.startswith("model.")
+    }
+
+    backbone = iresnet.iresnet50()
+    backbone.load_state_dict(state, strict=True)
+    model = _HyperFaceWrapper(backbone).to(device).eval()
+    print(f"[LOADED] {variant}")
+    return ModelBundle(model, variant, _HW, _HW, _MEAN, _STD)
 
 
 def _load_iresnet(path: str, depth: int, device: torch.device) -> ModelBundle:
@@ -183,6 +336,14 @@ def load_model_file(path: str, device: torch.device) -> ModelBundle:
             return _load_iresnet(path, 100, device)
         if "VIT" in name:
             return _load_vit(path, device)
+        # Check for locally cached HSFace weights (e.g. manually placed .pth files)
+        if name.lower() in HSFACE_VARIANTS:
+            model = iresnet_attn.iresnet50_attn()
+            state = torch.load(path, map_location=device, weights_only=True)
+            model.load_state_dict(state, strict=True)
+            model.to(device).eval()
+            print(f"[LOADED] {name}")
+            return ModelBundle(model, name, _HW, _HW, _MEAN, _STD)
         # Unknown .pth — try generic load
         return _load_generic_pt(path, device)
 
@@ -206,13 +367,13 @@ def load_all_models(
 ) -> list[ModelBundle]:
     """
     Load every .pt / .pth file in model_dir, then (optionally) all library
-    models (EdgeFace, FaceNet VGG, FaceNet CASIA).
+    models (EdgeFace, FaceNet VGG, FaceNet CASIA, HSFace10k, HSFace300k).
 
     Parameters
     ──────────
     model_dir             : folder containing .pt / .pth weight files
     device                : torch device
-    include_library_models: whether to also load edgeface + facenets
+    include_library_models: whether to also load edgeface + facenets + hsface
     skip_on_error         : if True, print a warning and continue on failure;
                             if False, re-raise the exception
 
@@ -242,6 +403,8 @@ def load_all_models(
     if include_library_models:
         for loader_fn in [
             *[lambda v=v: _load_edgeface(v, device) for v in EDGEFACE_VARIANTS],
+            *[lambda v=v: _load_hsface(v, device) for v in HSFACE_VARIANTS],
+            *[lambda v=v: _load_hyperface(v, device) for v in HYPERFACE_VARIANTS],
             lambda: _load_facenet("vggface2",     device),
             lambda: _load_facenet("casia-webface", device),
         ]:
@@ -290,6 +453,10 @@ def list_model_specs(
     if include_library_models:
         for variant in EDGEFACE_VARIANTS:
             specs.append(ModelSpec(name=variant, path=None))
+        for variant in HSFACE_VARIANTS:
+            specs.append(ModelSpec(name=variant, path=None))
+        for variant in HYPERFACE_VARIANTS:
+            specs.append(ModelSpec(name=variant, path=None))
         specs.append(ModelSpec(name="InceptionResnetV1_VGG",   path=None))
         specs.append(ModelSpec(name="InceptionResnetV1_CASIA", path=None))
 
@@ -308,6 +475,10 @@ def load_model_by_spec(
         # Library models identified by name
         if spec.name in EDGEFACE_VARIANTS:
             return _load_edgeface(spec.name, device)
+        if spec.name in HSFACE_VARIANTS:
+            return _load_hsface(spec.name, device)
+        if spec.name in HYPERFACE_VARIANTS:
+            return _load_hyperface(spec.name, device)
         if spec.name == "InceptionResnetV1_VGG":
             return _load_facenet("vggface2", device)
         if spec.name == "InceptionResnetV1_CASIA":

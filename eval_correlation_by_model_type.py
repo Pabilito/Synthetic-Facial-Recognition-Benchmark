@@ -9,6 +9,8 @@ Runs the correlation analysis twice:
 Synthetic models:
     IDiffFace_CF50
     SFace_IResNet50
+    hsface10k
+    hsface300k
 
 Outputs (per type):
   correlation_all_datasets_<type>.png
@@ -31,6 +33,8 @@ from scipy import stats
 SYNTH_MODELS = {
     "IDiffFace_CF50",
     "SFace_IResNet50",
+    "hsface10k",
+    "hsface300k",
 }
 
 
