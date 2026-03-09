@@ -26,7 +26,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from data.synth.synth_utils import SYNTH_ROOT, parse_ann
-from load_model import load_all_models, ModelBundle
+from load_model import list_model_specs, load_model_by_spec, release_model, ModelBundle
 from eval_utils import (
     PairDataset, make_transform, extract_embeddings, eval_10fold,
     append_to_detail_csv, append_to_summary_csv, BATCH_SIZE, NUM_WORKERS,
@@ -108,23 +108,22 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}\n")
 
-    # Load models
-    bundles = load_all_models(
+    # List models without loading weights yet
+    specs = list_model_specs(
         model_dir=args.model_dir,
-        device=device,
         include_library_models=not args.no_library_models,
     )
     if args.model:
-        bundles = [b for b in bundles if b.name == args.model]
-        if not bundles:
+        specs = [s for s in specs if s.name == args.model]
+        if not specs:
             print(f"[ERROR] Model '{args.model}' not found.")
             return
 
-    if not bundles:
-        print("[ERROR] No models loaded.")
+    if not specs:
+        print("[ERROR] No models found.")
         return
 
-    print(f"\nLoaded {len(bundles)} model(s): {[b.name for b in bundles]}\n")
+    print(f"Found {len(specs)} model(s): {[s.name for s in specs]}\n")
 
     # Resolve datasets
     if args.dataset:
@@ -139,15 +138,22 @@ def main() -> None:
         print("[ERROR] No datasets found.")
         return
 
-    # Evaluate all model × dataset combinations
+    # Evaluate one model at a time — load, evaluate all datasets, release
     summary: dict[str, dict[str, tuple[float, float]]] = {}
-    for bundle in bundles:
+    for spec in specs:
+        bundle = load_model_by_spec(spec, device)
+        if bundle is None:
+            continue
+
         print(f"━━━ {bundle.name} ━━━")
         summary[bundle.name] = {}
         for ds_name in ds_names:
             result = evaluate(bundle, ds_name, device)
             if result:
                 summary[bundle.name][ds_name] = result
+
+        release_model(bundle)
+        del bundle
         print()
 
     # Summary table

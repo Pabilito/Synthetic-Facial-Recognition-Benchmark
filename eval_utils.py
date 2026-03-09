@@ -39,8 +39,12 @@ class PairDataset(Dataset):
 
     def __getitem__(self, idx):
         p1, p2, label = self.pairs[idx]
-        img1 = Image.open(self.base_dir / p1).convert("RGB")
-        img2 = Image.open(self.base_dir / p2).convert("RGB")
+        img1 = Image.open(self.base_dir / p1)
+        img1.load()
+        img1 = img1.convert("RGB")
+        img2 = Image.open(self.base_dir / p2)
+        img2.load()
+        img2 = img2.convert("RGB")
         return self.transform(img1), self.transform(img2), int(label)
 
 
@@ -65,8 +69,17 @@ def extract_embeddings(
 ) -> tuple[torch.Tensor, torch.Tensor, np.ndarray]:
     e1_list, e2_list, labels = [], [], []
     for img1, img2, label in loader:
-        e1_list.append(F.normalize(model(img1.to(device)), dim=1).cpu())
-        e2_list.append(F.normalize(model(img2.to(device)), dim=1).cpu())
+        out1 = model(img1.to(device))
+        out2 = model(img2.to(device))
+        # SwinFace returns a dict of 43 outputs — "Recognition" is the face embedding.
+        # With set_output_type("Recognition") in load_model.py this should already be
+        # a tensor, but the guard is kept as a safety net for any other dict-returning model.
+        if isinstance(out1, dict):
+            out1 = out1["Recognition"]
+        if isinstance(out2, dict):
+            out2 = out2["Recognition"]
+        e1_list.append(F.normalize(out1, dim=1).cpu())
+        e2_list.append(F.normalize(out2, dim=1).cpu())
         labels.extend(label.tolist())
     return torch.cat(e1_list), torch.cat(e2_list), np.array(labels)
 

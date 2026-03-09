@@ -43,7 +43,7 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 import torch
 
-from load_model import load_all_models, ModelBundle
+from load_model import list_model_specs, load_model_by_spec, release_model, ModelBundle
 from eval_utils import (
     PairDataset, make_transform, extract_embeddings, eval_10fold,
     append_to_detail_csv, append_to_summary_csv, BATCH_SIZE, NUM_WORKERS,
@@ -52,7 +52,7 @@ from eval_utils import (
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR  = Path(__file__).parent
-VAL_DIR     = SCRIPT_DIR / "data" / "val"
+VAL_DIR     = SCRIPT_DIR / "data" / "real"
 MODEL_DIR   = SCRIPT_DIR / "Pretrained_Models"
 EVAL_DIR    = SCRIPT_DIR / "Evaluation"
 DETAIL_CSV  = EVAL_DIR / "real_detail.csv"
@@ -131,17 +131,16 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}\n")
 
-    # Load all models
-    bundles = load_all_models(
+    # List all models without loading weights yet
+    specs = list_model_specs(
         model_dir=args.model_dir,
-        device=device,
         include_library_models=not args.no_library_models,
     )
-    if not bundles:
-        print("[ERROR] No models loaded.")
+    if not specs:
+        print("[ERROR] No models found.")
         return
 
-    print(f"\nLoaded {len(bundles)} model(s): {[b.name for b in bundles]}\n")
+    print(f"Found {len(specs)} model(s): {[s.name for s in specs]}\n")
 
     # Check datasets
     available = {name: path for name, path in DATASETS.items() if path.exists()}
@@ -149,18 +148,25 @@ def main() -> None:
     if missing:
         print(f"[warn] Annotation files not found, skipping: {missing}")
     if not available:
-        print("[ERROR] No annotation files found under data/val/")
+        print("[ERROR] No annotation files found under data/real/")
         return
 
-    # Evaluate
+    # Evaluate one model at a time — load, evaluate all datasets, release
     summary: dict[str, dict[str, tuple[float, float]]] = {}
-    for bundle in bundles:
+    for spec in specs:
+        bundle = load_model_by_spec(spec, device)
+        if bundle is None:
+            continue
+
         print(f"━━━ {bundle.name} ━━━")
         summary[bundle.name] = {}
         for ds_name, ann_path in available.items():
             result = evaluate(bundle, ds_name, ann_path, device)
             if result:
                 summary[bundle.name][ds_name] = result
+
+        release_model(bundle)
+        del bundle
         print()
 
     # Summary table

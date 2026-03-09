@@ -70,16 +70,26 @@ _HW   = 112   # default height = width
 
 # ── Library model names (no local file required) ──────────────────────────────
 
-LIBRARY_MODELS = ["edgeface_base", "InceptionResnetV1_VGG", "InceptionResnetV1_CASIA"]
+EDGEFACE_VARIANTS = [
+    "edgeface_base",
+    "edgeface_s_gamma_05",
+    "edgeface_xs_q",
+    "edgeface_xs_gamma_06",
+    "edgeface_xxs",
+    "edgeface_xxs_q",
+]
+
+# Library model names (no local file required)
+LIBRARY_MODELS = EDGEFACE_VARIANTS + ["InceptionResnetV1_VGG", "InceptionResnetV1_CASIA"]
 
 # ── Individual loaders ────────────────────────────────────────────────────────
 
-def _load_edgeface(device: torch.device) -> ModelBundle:
+def _load_edgeface(variant: str, device: torch.device) -> ModelBundle:
     model = torch.hub.load(
-        "otroshi/edgeface", "edgeface_base", source="github", pretrained=True
+        "otroshi/edgeface", variant, source="github", pretrained=True
     ).to(device).eval()
-    print("[LOADED] edgeface_base")
-    return ModelBundle(model, "edgeface_base", _HW, _HW, _MEAN, _STD)
+    print(f"[LOADED] {variant}")
+    return ModelBundle(model, variant, _HW, _HW, _MEAN, _STD)
 
 
 def _load_facenet(
@@ -97,7 +107,7 @@ def _load_facenet(
 def _load_iresnet(path: str, depth: int, device: torch.device) -> ModelBundle:
     builder = {18: iresnet.iresnet18, 50: iresnet.iresnet50, 100: iresnet.iresnet100}[depth]
     model   = builder()
-    model.load_state_dict(torch.load(path, map_location=device), strict=True)
+    model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=True)
     model.to(device).eval()
     name = os.path.splitext(os.path.basename(path))[0]
     print(f"[LOADED] {name}")
@@ -110,7 +120,7 @@ def _load_vit(path: str, device: torch.device) -> ModelBundle:
         num_class=93431, dim=512, depth=20, heads=8, mlp_dim=2048,
         dropout=0.1, emb_dropout=0.1,
     )
-    model.load_state_dict(torch.load(path, map_location=device), strict=True)
+    model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=True)
     model.to(device).eval()
     name = os.path.splitext(os.path.basename(path))[0]
     print(f"[LOADED] {name}")
@@ -122,7 +132,7 @@ def _load_transface(path: str, device: torch.device) -> ModelBundle:
         img_size=112, patch_size=9, num_classes=512, embed_dim=512,
         depth=12, num_heads=8, drop_path_rate=0.05, norm_layer="ln", mask_ratio=0.0,
     )
-    model.load_state_dict(torch.load(path, map_location=device), strict=True)
+    model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=True)
     model.to(device).eval()
     name = os.path.splitext(os.path.basename(path))[0]
     print(f"[LOADED] {name}")
@@ -132,18 +142,22 @@ def _load_transface(path: str, device: torch.device) -> ModelBundle:
 def _load_swinface(path: str, device: torch.device) -> ModelBundle:
     cfg   = swin_subnets.SwinFaceCfg()
     model = swin_subnets.build_model(cfg)
-    ckpt  = torch.load(path, map_location=device)
+    ckpt  = torch.load(path, map_location=device, weights_only=False)
     model.backbone.load_state_dict(ckpt["state_dict_backbone"])
     model.fam.load_state_dict(ckpt["state_dict_fam"])
     model.tss.load_state_dict(ckpt["state_dict_tss"])
     model.om.load_state_dict(ckpt["state_dict_om"])
+    # Return only the face recognition embedding, not the full 43-output dict
+    model.set_output_type("Recognition")
     model.to(device).eval()
     print("[LOADED] SwinFace")
     return ModelBundle(model, "SwinFace", _HW, _HW, _MEAN, _STD)
 
 
 def _load_generic_pt(path: str, device: torch.device) -> ModelBundle:
-    model = torch.load(path, map_location=device).eval()
+    # weights_only=False required: these files contain a full serialised model
+    # object, not just a state dict (triggered by PyTorch 2.6 default change).
+    model = torch.load(path, map_location=device, weights_only=False).eval()
     name  = os.path.splitext(os.path.basename(path))[0]
     print(f"[LOADED] {name}")
     return ModelBundle(model, name, _HW, _HW, _MEAN, _STD)
@@ -229,9 +243,9 @@ def load_all_models(
     # ── Library models ────────────────────────────────────────────────────────
     if include_library_models:
         for loader_fn in [
-            lambda: _load_edgeface(device),
-            lambda: _load_facenet("vggface2",      device),
-            lambda: _load_facenet("casia-webface",  device),
+            *[lambda v=v: _load_edgeface(v, device) for v in EDGEFACE_VARIANTS],
+            lambda: _load_facenet("vggface2",     device),
+            lambda: _load_facenet("casia-webface", device),
         ]:
             try:
                 bundles.append(loader_fn())
@@ -242,3 +256,77 @@ def load_all_models(
                     raise
 
     return bundles
+
+
+# ── Spec-based API (memory-safe, one model at a time) ─────────────────────────
+
+@dataclass
+class ModelSpec:
+    """Lightweight descriptor — no weights loaded yet."""
+    name: str
+    path: str | None  # None for library models
+
+
+def list_model_specs(
+    model_dir: str,
+    include_library_models: bool = True,
+) -> list[ModelSpec]:
+    """
+    Return a list of ModelSpec objects without loading any weights.
+    Pass each spec to load_model_by_spec() one at a time inside your eval loop,
+    deleting the bundle and calling release_model() between iterations to keep
+    only one model on GPU at a time.
+    """
+    specs: list[ModelSpec] = []
+
+    candidates = sorted(
+        f for f in os.listdir(model_dir)
+        if os.path.splitext(f)[1].lower() in (".pt", ".pth")
+    )
+    for filename in candidates:
+        specs.append(ModelSpec(
+            name=os.path.splitext(filename)[0],
+            path=os.path.join(model_dir, filename),
+        ))
+
+    if include_library_models:
+        for variant in EDGEFACE_VARIANTS:
+            specs.append(ModelSpec(name=variant, path=None))
+        specs.append(ModelSpec(name="InceptionResnetV1_VGG",   path=None))
+        specs.append(ModelSpec(name="InceptionResnetV1_CASIA", path=None))
+
+    return specs
+
+
+def load_model_by_spec(
+    spec: ModelSpec,
+    device: torch.device,
+    skip_on_error: bool = True,
+) -> ModelBundle | None:
+    """Load a single model from a ModelSpec. Returns None on failure."""
+    try:
+        if spec.path is not None:
+            return load_model_file(spec.path, device)
+        # Library models identified by name
+        if spec.name in EDGEFACE_VARIANTS:
+            return _load_edgeface(spec.name, device)
+        if spec.name == "InceptionResnetV1_VGG":
+            return _load_facenet("vggface2", device)
+        if spec.name == "InceptionResnetV1_CASIA":
+            return _load_facenet("casia-webface", device)
+        raise ValueError(f"Unknown library model: {spec.name}")
+    except Exception as exc:
+        if skip_on_error:
+            print(f"[WARN] Skipped {spec.name}: {exc}")
+            return None
+        raise
+
+
+def release_model(bundle: ModelBundle) -> None:
+    """
+    Move model off GPU, delete it, and free the CUDA cache.
+    Call this immediately after finishing all datasets for one model.
+    """
+    bundle.model.cpu()
+    del bundle.model
+    torch.cuda.empty_cache()
