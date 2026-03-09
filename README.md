@@ -33,5 +33,32 @@ dos2unix filename.sh
 sed -i 's/\r//' ./filename.sh
 ~~~
 
+Some datasets (Vec2Face, Digi2Real) need additional preprocessing to match common structure of a folder per identity
+~~~
+TBD
+~~~
+
+## Synthetic Datasets Preprocessing
+
+Generate DATASETNAME_ann.txt files with mated and non-mated pairs for evaluation:
+~~~
+python data/synth/generate_ann.py
+~~~
+
+## Evaluation
+
+To use real/synthetic datasets as benchmarks run: 
+~~~
+python eval_real.py
+python eval_synth.py
+~~~
+
+It saves separate comparisons results to: 
+- *Evaluation/synth.csv* 
+- *Evaluation/real.csv*  
+
+and overal results to: 
+- *Evaluation/synth_summary.csv* 
+- *Evaluation/real_summary.csv*
 
 

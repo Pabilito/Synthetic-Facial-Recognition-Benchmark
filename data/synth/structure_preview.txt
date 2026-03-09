@@ -86,8 +86,6 @@ Name
 01085/01085_17.png
 01085/01085_31.png
 
-=== IDNet (zip) ===
-
 === SFace2 (zip) ===
 Name
 ----
