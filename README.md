@@ -69,12 +69,26 @@ Models trained on synthetic data:
 - [IDiff-Face](https://github.com/fdbtrs/IDiff-Face)
 - Vec2Face, Langevin-Disco, Langevin-Dispersion and HyperFace are loaded from HuggingFace
 
-## Evaluation
+## Simplified execution
+To re-run the experiments use: 
+
+~~~
+python run_all.py
+~~~
+
+Outputs are saved to the *Evaluation/* directory.
+
+## Step by step execution
+
+### Evaluation
 
 To use real/synthetic datasets as benchmarks run: 
 ~~~
 python eval_real.py
 python eval_synth.py
+
+# Since IJB works with templates, we report only biometric values and skip the accuracy
+python eval_ijb.py
 ~~~
 
 It saves separate comparisons results to: 
@@ -94,7 +108,7 @@ Output:
 - *Evaluation/biometric_metrics.csv*
 
 
-## Demographic Analysis
+### Demographic Analysis
 
 We use predictors from [DeepFace](https://github.com/serengil/deepface) to estimate age and gender of each dataset identity.
 
@@ -105,7 +119,7 @@ python Dataset_Demographic_Analysis/demographic_analysis.py
 python Dataset_Demographic_Analysis/demographic_analysis.py --datasets LFW CemiFace
 ~~~
 
-## Correlation Analysis
+### Correlation Analysis
 ~~~
 # Aggregated evaluation
 python eval_correlation.py

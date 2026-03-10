@@ -49,7 +49,9 @@ from eval_utils import parse_ann
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = Path(__file__).parent
-SYNTH_ROOT = SCRIPT_DIR / "data" / "synth"
+# generate_ann.py lives inside data/synth/ — SYNTH_ROOT is the script's own directory.
+# (eval_real.py and eval_synth.py live at the project root two levels up.)
+SYNTH_ROOT = SCRIPT_DIR
 N_PAIRS    = 6000   # must be divisible by 10 for clean 10-fold split
 SEED       = 42
 IMG_EXTS   = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
@@ -68,13 +70,21 @@ def make_relative(path: Path, base: Path) -> str:
 def scan_identity_folders(dataset_dir: Path) -> dict[str, list[Path]]:
     """
     Convention A: return {identity_name: [sorted image paths]}.
-    Only sub-directories that contain at least one image are included.
+
+    Handles both flat (identity/img.jpg) and nested (identity/session/img.jpg)
+    layouts by collecting images from the sub-folder itself and any of its
+    immediate children.
     """
     identities: dict[str, list[Path]] = {}
     for subdir in sorted(dataset_dir.iterdir()):
         if not subdir.is_dir():
             continue
+        # Direct images
         imgs = sorted(f for f in subdir.iterdir() if f.is_file() and is_image(f))
+        # Images one level deeper (session sub-folders)
+        for child in sorted(subdir.iterdir()):
+            if child.is_dir():
+                imgs += sorted(f for f in child.iterdir() if f.is_file() and is_image(f))
         if imgs:
             identities[subdir.name] = imgs
     return identities
@@ -86,12 +96,22 @@ def scan_flat_folder(dataset_dir: Path) -> list[Path]:
 
 
 def detect_convention(dataset_dir: Path) -> str:
-    """Return 'A' if the folder contains identity sub-folders, else 'B'."""
-    subdirs_with_images = [
-        d for d in dataset_dir.iterdir()
-        if d.is_dir() and any(is_image(f) for f in d.iterdir() if f.is_file())
-    ]
-    return "A" if subdirs_with_images else "B"
+    """Return 'A' if the folder contains identity sub-folders, else 'B'.
+
+    Scans one level of sub-directories and checks for images either directly
+    inside them or one level deeper (handles identity/session nested layouts).
+    """
+    for d in dataset_dir.iterdir():
+        if not d.is_dir():
+            continue
+        # Direct images inside the sub-folder
+        if any(is_image(f) for f in d.iterdir() if f.is_file()):
+            return "A"
+        # Images one level deeper (e.g. identity/session/img.jpg)
+        for dd in d.iterdir():
+            if dd.is_dir() and any(is_image(f) for f in dd.iterdir() if f.is_file()):
+                return "A"
+    return "B"
 
 
 # ── Pair generators ───────────────────────────────────────────────────────────
@@ -293,7 +313,8 @@ def main() -> None:
         print(f"[ERROR] Synthetic data root not found: {SYNTH_ROOT}")
         return
 
-    datasets = sorted(d for d in SYNTH_ROOT.iterdir() if d.is_dir())
+    EXCLUDE  = {"__pycache__"}
+    datasets = sorted(d for d in SYNTH_ROOT.iterdir() if d.is_dir() and d.name not in EXCLUDE)
     if not datasets:
         print(f"[ERROR] No sub-folders found in {SYNTH_ROOT}")
         return

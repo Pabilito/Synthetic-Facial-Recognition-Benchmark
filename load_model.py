@@ -263,13 +263,30 @@ def _load_hyperface(variant: str, device: torch.device) -> ModelBundle:
 
 
 def _load_iresnet(path: str, depth: int, device: torch.device) -> ModelBundle:
-    builder = {18: iresnet.iresnet18, 50: iresnet.iresnet50, 100: iresnet.iresnet100}[depth]
-    model   = builder()
-    model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=True)
-    model.to(device).eval()
     name = os.path.splitext(os.path.basename(path))[0]
-    print(f"[LOADED] {name}")
-    return ModelBundle(model, name, _HW, _HW, _MEAN, _STD)
+    # Try loading as a plain state dict first (standard .pth convention).
+    # Some .pt files are torch.fx compiled full-model objects — if state-dict
+    # loading fails, fall back to loading the full object directly.
+    try:
+        builder = {18: iresnet.iresnet18, 50: iresnet.iresnet50, 100: iresnet.iresnet100}[depth]
+        model   = builder()
+        state   = torch.load(path, map_location=device, weights_only=False)
+        # If the loaded object is already a module (compiled model), use it directly
+        if isinstance(state, torch.nn.Module):
+            model = state
+        else:
+            model.load_state_dict(state, strict=True)
+        model.to(device).eval()
+        print(f"[LOADED] {name}")
+        return ModelBundle(model, name, _HW, _HW, _MEAN, _STD)
+    except Exception:
+        # Last resort: treat as a fully serialised model object
+        model = torch.load(path, map_location=device, weights_only=False)
+        if isinstance(model, torch.nn.Module):
+            model = model.eval()
+            print(f"[LOADED] {name}")
+            return ModelBundle(model, name, _HW, _HW, _MEAN, _STD)
+        raise
 
 
 def _load_vit(path: str, device: torch.device) -> ModelBundle:
@@ -286,14 +303,23 @@ def _load_vit(path: str, device: torch.device) -> ModelBundle:
 
 
 def _load_transface(path: str, device: torch.device) -> ModelBundle:
-    model = trans.VisionTransformer(
-        img_size=112, patch_size=9, num_classes=512, embed_dim=512,
-        depth=12, num_heads=8, drop_path_rate=0.05, norm_layer="ln", mask_ratio=0.0,
-    )
-    model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=True)
-    model.to(device).eval()
     name = os.path.splitext(os.path.basename(path))[0]
-    print(f"[LOADED] {name}")
+    # TransFace comes in two sizes (from the original paper / official repo):
+    #   S (Small): embed_dim=512, depth=12, num_heads=8
+    #   L (Large): embed_dim=768, depth=24, num_heads=12
+    # Detect variant from filename; default to S if ambiguous.
+    if "_L" in name or name.endswith("_L"):
+        embed_dim, depth, num_heads = 768, 24, 12
+    else:
+        embed_dim, depth, num_heads = 512, 12, 8
+    model = trans.VisionTransformer(
+        img_size=112, patch_size=9, num_classes=512, embed_dim=embed_dim,
+        depth=depth, num_heads=num_heads, drop_path_rate=0.05,
+        norm_layer="ln", mask_ratio=0.0,
+    )
+    model.load_state_dict(torch.load(path, map_location=device, weights_only=False), strict=True)
+    model.to(device).eval()
+    print(f"[LOADED] {name}  (TransFace-{'L' if embed_dim == 768 else 'S'})")
     return ModelBundle(model, name, _HW, _HW, _MEAN, _STD)
 
 
