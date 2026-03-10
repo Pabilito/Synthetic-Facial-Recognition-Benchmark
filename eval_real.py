@@ -2,7 +2,7 @@
 eval_real.py
 ─────────────────────────────────────────────────────────────────────────────
 Evaluates every model returned by load_all_models() on the real face
-verification benchmarks: LFW, CALFW, CPLFW, AgeDB-30.
+verification benchmarks: LFW, CALFW, CPLFW, AgeDB-30, etc.
 
 Expected structure (relative to this script):
   data/val/
@@ -14,6 +14,7 @@ Expected structure (relative to this script):
     calfw_ann.txt
     cplfw_ann.txt
     agedb_30_ann.txt
+    (+ more)
 
   Pretrained_Models/
     IResNet_R18_Glint360K.pth
@@ -24,6 +25,7 @@ Expected structure (relative to this script):
     TransFace_S_Glint360K.pt
     SwinFace.pt
     (+ edgeface_base and FaceNets loaded from libraries)
+    (+ more)
 
 Outputs
 ───────
@@ -65,6 +67,7 @@ DATASETS: dict[str, Path] = {
     "CALFW":    VAL_DIR / "calfw_ann.txt",
     "CPLFW":    VAL_DIR / "cplfw_ann.txt",
     "AgeDB-30": VAL_DIR / "agedb_30_ann.txt",
+    "CFP-FP":   VAL_DIR / "cfp_fp_ann.txt",
 }
 
 

@@ -35,6 +35,9 @@ SYNTH_MODELS = {
     "SFace_IResNet50",
     "hsface10k",
     "hsface300k",
+    "hyperface_50k_stylegan",   
+    "langevin_disco_30k",       
+    "langevin_dispersion_10k",
 }
 
 

@@ -85,6 +85,15 @@ and overal results to:
 - *Evaluation/synth_summary.csv* 
 - *Evaluation/real_summary.csv*
 
+To evaluate biometric metrics from saved similarity scores run:
+~~~
+python eval_biometric.py
+~~~
+
+Output:
+- *Evaluation/biometric_metrics.csv*
+
+
 ## Demographic Analysis
 
 We use predictors from [DeepFace](https://github.com/serengil/deepface) to estimate age and gender of each dataset identity.
@@ -103,14 +112,18 @@ python eval_correlation.py
 # Split by models trained only on real/synthetic data
 python eval_correlation_by_model_type.py
 # Confidence intervals
-python -u eval_correlation_ci.py
+python eval_correlation_ci.py
+
+# Biometric indicators evaluation
+python eval_biometric_correlation.py
 ~~~
 
 Outputs: 
 
-- *Evaluation/correlation_all_datasets[_real|_synth].png*
-- *Evaluation/correlation_heatmap[_real|_synth].png*
-- *Evaluation/dataset_correlations[_real|_synth].csv*
+- *Evaluation/correlation_all_datasets<_real|_synth>.png*
+- *Evaluation/correlation_heatmap<_real|_synth>.png*
+- *Evaluation/dataset_correlations<_real|_synth>.csv*
 
-TODO:
-Find correct links for hyperface and langevins
+- *biometric_corr_<metric>.csv*         
+- *biometric_corr_heatmap_<metric>.png*
+- *biometric_corr_forest_<metric>.png*
