@@ -37,16 +37,18 @@ Notes on Idiap Lightning checkpoints (HyperFace / Langevin family)
   All three Idiap models share the same checkpoint format and inference
   convention, so a single loader (_load_hyperface) handles all of them:
 
+  • Architecture: AdaFace Backbone (IR_50) from Pretrained_Models/net.py.
+    The Idiap repo is based on AdaFace (mk-minchul/AdaFace) and uses its
+    Backbone class (input_layer / body / output_layer).  We import net.py
+    directly so weights load without any key remapping.
+
   • Checkpoint format: PyTorch Lightning .ckpt (weights_only=False required).
     Weights live under ckpt["state_dict"] with keys prefixed by "model." —
-    this loader strips that prefix before calling iresnet50.load_state_dict().
+    this loader strips that prefix before calling backbone.load_state_dict().
 
-  • Output: the IResNet forward() returns a tuple (embedding, norm).
-    _HyperFaceWrapper unpacks it so every ModelBundle returns a plain tensor.
-
-  • Input colour: BGR (InsightFace convention).  _HyperFaceWrapper flips
-    channels RGB→BGR transparently, so callers use the same RGB pipeline
-    as every other model in this file.
+  • Output: Backbone.forward() returns (embedding, norm). _HyperFaceWrapper
+    unpacks the tuple and flips channels RGB→BGR transparently, so callers
+    use the same RGB pipeline as every other model in this file.
 
 Usage
 ─────
@@ -73,6 +75,7 @@ import Pretrained_Models.iresnet_attn as iresnet_attn
 import Pretrained_Models.vit_face as vit
 import Pretrained_Models.vit_trans as trans
 from Pretrained_Models import swin_subnets
+from Pretrained_Models import net as adaface_net
 
 # ── Return type ───────────────────────────────────────────────────────────────
 
@@ -192,21 +195,21 @@ def _load_hsface(variant: str, device: torch.device) -> ModelBundle:
 
 class _HyperFaceWrapper(nn.Module):
     """
-    Thin wrapper around an IResNet that:
-      1. Flips channels RGB→BGR before the forward pass (HyperFace was
-         trained with InsightFace's BGR convention).
-      2. Unpacks the tuple output (embedding, _) so callers receive a
-         plain embedding tensor, consistent with every other ModelBundle.
+    Thin wrapper around the AdaFace Backbone that:
+      1. Flips channels RGB→BGR before the forward pass (the Idiap/AdaFace
+         models expect BGR input).
+      2. Unpacks the (embedding, norm) tuple that Backbone.forward() always
+         returns, so every ModelBundle yields a plain embedding tensor.
     """
     def __init__(self, backbone: nn.Module) -> None:
         super().__init__()
         self.backbone = backbone
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x is expected in RGB order; flip to BGR for HyperFace
+        # x arrives in RGB order (our standard pipeline); flip to BGR
         x_bgr = x[:, [2, 1, 0], :, :]
         out = self.backbone(x_bgr)
-        # IResNet used by HyperFace returns (embedding, norm) tuple
+        # Backbone.forward() returns (embedding, norm) — extract embedding
         if isinstance(out, (tuple, list)):
             return out[0]
         return out
@@ -214,16 +217,18 @@ class _HyperFaceWrapper(nn.Module):
 
 def _load_hyperface(variant: str, device: torch.device) -> ModelBundle:
     """
-    Load a HyperFace / Langevin FR model (IResNet-50) from HuggingFace.
+    Load a HyperFace / Langevin FR model from HuggingFace.
 
-    The checkpoint is a PyTorch Lightning .ckpt file.  Lightning saves weights
-    under the "state_dict" key with all parameter names prefixed by "model.".
-    This loader strips that prefix and loads into a plain iresnet50() instance,
-    then wraps it with _HyperFaceWrapper to normalise the output interface and
-    handle BGR↔RGB conversion.
+    The Idiap codebase is derived from AdaFace (mk-minchul/AdaFace) and uses
+    the Backbone class from Pretrained_Models/net.py (input_layer / body /
+    output_layer).  We instantiate it via adaface_net.IR_50() so weights load
+    without any key remapping.
 
-    The exact filename on the hub is confirmed from the repo file listings
-    and stored in _HYPERFACE_REPO — no runtime discovery needed.
+    Backbone.forward() returns (embedding, norm); _HyperFaceWrapper unpacks
+    this to a plain tensor consistent with every other ModelBundle.
+
+    Checkpoint format: PyTorch Lightning .ckpt.  Weights live under
+    ckpt["state_dict"] with all keys prefixed by "model." — stripped here.
     """
     try:
         from huggingface_hub import hf_hub_download
@@ -239,20 +244,22 @@ def _load_hyperface(variant: str, device: torch.device) -> ModelBundle:
     # Lightning checkpoint: weights_only=False because the file is a pickled
     # dict (not a plain state-dict tensor file).
     ckpt = torch.load(local_path, map_location=device, weights_only=False)
-    raw_state = ckpt["state_dict"]
 
-    # Strip the "model." prefix added by the LightningModule wrapper
+    # Strip the "model." prefix added by the LightningModule wrapper.
     state = {
         k[len("model."):]: v
-        for k, v in raw_state.items()
+        for k, v in ckpt["state_dict"].items()
         if k.startswith("model.")
     }
 
-    backbone = iresnet.iresnet50()
+    # Use the real AdaFace Backbone from Pretrained_Models/net.py — keys
+    # match the checkpoint exactly, no remapping needed.
+    backbone = adaface_net.IR_50(input_size=(112, 112))
     backbone.load_state_dict(state, strict=True)
     model = _HyperFaceWrapper(backbone).to(device).eval()
     print(f"[LOADED] {variant}")
     return ModelBundle(model, variant, _HW, _HW, _MEAN, _STD)
+
 
 
 def _load_iresnet(path: str, depth: int, device: torch.device) -> ModelBundle:
@@ -400,11 +407,13 @@ def load_all_models(
                 raise
 
     # ── Library models ────────────────────────────────────────────────────────
+    # HyperFace/Langevin variants are listed first so that any loading errors
+    # surface early in the run rather than after all other models have loaded.
     if include_library_models:
         for loader_fn in [
+            *[lambda v=v: _load_hyperface(v, device) for v in HYPERFACE_VARIANTS],
             *[lambda v=v: _load_edgeface(v, device) for v in EDGEFACE_VARIANTS],
             *[lambda v=v: _load_hsface(v, device) for v in HSFACE_VARIANTS],
-            *[lambda v=v: _load_hyperface(v, device) for v in HYPERFACE_VARIANTS],
             lambda: _load_facenet("vggface2",     device),
             lambda: _load_facenet("casia-webface", device),
         ]:
@@ -437,30 +446,40 @@ def list_model_specs(
     Pass each spec to load_model_by_spec() one at a time inside your eval loop,
     deleting the bundle and calling release_model() between iterations to keep
     only one model on GPU at a time.
-    """
-    specs: list[ModelSpec] = []
 
+    Ordering: HyperFace/Langevin variants are always first so that any
+    loading errors surface at the very start of the run.  File-based models
+    follow, then the remaining library models (EdgeFace, HSFace, FaceNet).
+    """
+    # ── 1. HyperFace / Langevin first ─────────────────────────────────────────
+    hyperface_specs: list[ModelSpec] = []
+    if include_library_models:
+        for variant in HYPERFACE_VARIANTS:
+            hyperface_specs.append(ModelSpec(name=variant, path=None))
+
+    # ── 2. File-based models ───────────────────────────────────────────────────
+    file_specs: list[ModelSpec] = []
     candidates = sorted(
         f for f in os.listdir(model_dir)
         if os.path.splitext(f)[1].lower() in (".pt", ".pth")
     )
     for filename in candidates:
-        specs.append(ModelSpec(
+        file_specs.append(ModelSpec(
             name=os.path.splitext(filename)[0],
             path=os.path.join(model_dir, filename),
         ))
 
+    # ── 3. Remaining library models ────────────────────────────────────────────
+    other_library_specs: list[ModelSpec] = []
     if include_library_models:
         for variant in EDGEFACE_VARIANTS:
-            specs.append(ModelSpec(name=variant, path=None))
+            other_library_specs.append(ModelSpec(name=variant, path=None))
         for variant in HSFACE_VARIANTS:
-            specs.append(ModelSpec(name=variant, path=None))
-        for variant in HYPERFACE_VARIANTS:
-            specs.append(ModelSpec(name=variant, path=None))
-        specs.append(ModelSpec(name="InceptionResnetV1_VGG",   path=None))
-        specs.append(ModelSpec(name="InceptionResnetV1_CASIA", path=None))
+            other_library_specs.append(ModelSpec(name=variant, path=None))
+        other_library_specs.append(ModelSpec(name="InceptionResnetV1_VGG",   path=None))
+        other_library_specs.append(ModelSpec(name="InceptionResnetV1_CASIA", path=None))
 
-    return specs
+    return hyperface_specs + file_specs + other_library_specs
 
 
 def load_model_by_spec(

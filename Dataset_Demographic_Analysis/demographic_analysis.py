@@ -31,6 +31,18 @@ Usage
   python demographic_analysis.py --real-only
   python demographic_analysis.py --synth-only
   python demographic_analysis.py --resume          # skip images already in the CSV
+
+  # Run only selected datasets (mix of real and synthetic, by name):
+  python demographic_analysis.py --datasets lfw cemiFace
+
+  # Selected datasets + resume:
+  python demographic_analysis.py --datasets lfw cemiFace --resume
+
+  --datasets resolves each name against both data/real/ and data/synth/
+  automatically, so there is no need to also pass --real-only / --synth-only.
+  Names are matched case-insensitively against the ann.txt stem
+  (e.g. "lfw" matches data/real/lfw_ann.txt, "cemiFace" matches
+  data/synth/cemiface_ann.txt).
 """
 
 import argparse
@@ -177,21 +189,51 @@ def main() -> None:
     parser.add_argument("--real-only",  action="store_true")
     parser.add_argument("--synth-only", action="store_true")
     parser.add_argument(
+        "--datasets",
+        nargs="+",
+        metavar="NAME",
+        help=(
+            "Process only the named dataset(s). Names are matched "
+            "case-insensitively against the ann.txt stem and are searched "
+            "in both data/real/ and data/synth/ (overrides --real-only / "
+            "--synth-only)."
+        ),
+    )
+    parser.add_argument(
         "--resume", action="store_true",
         help="Skip images already present in demographics.csv."
     )
     args = parser.parse_args()
 
-    roots = []
-    if not args.synth_only:
-        roots.append(REAL_ROOT)
-    if not args.real_only:
-        roots.append(SYNTH_ROOT)
+    # When --datasets is given, search both roots regardless of --real/synth-only
+    if args.datasets:
+        roots = [REAL_ROOT, SYNTH_ROOT]
+    else:
+        roots = []
+        if not args.synth_only:
+            roots.append(REAL_ROOT)
+        if not args.real_only:
+            roots.append(SYNTH_ROOT)
 
     # Collect all (dataset_name, ann_path, img_root) entries
     all_entries: list[tuple[str, Path, Path]] = []
     for root in roots:
         all_entries.extend(find_ann_files(root))
+
+    # Filter to requested datasets when --datasets is supplied
+    if args.datasets:
+        requested = {name.lower() for name in args.datasets}
+        all_entries = [
+            e for e in all_entries if e[0].lower() in requested
+        ]
+        found = {e[0].lower() for e in all_entries}
+        missing = requested - found
+        if missing:
+            print(
+                f"[WARN] The following dataset(s) were not found in "
+                f"{REAL_ROOT} or {SYNTH_ROOT}: "
+                + ", ".join(sorted(missing))
+            )
 
     if not all_entries:
         print("[ERROR] No *_ann.txt files found.")

@@ -90,7 +90,10 @@ and overal results to:
 We use predictors from [DeepFace](https://github.com/serengil/deepface) to estimate age and gender of each dataset identity.
 
 ~~~
+# All datasets
 python Dataset_Demographic_Analysis/demographic_analysis.py
+# Selected dataset
+python Dataset_Demographic_Analysis/demographic_analysis.py --datasets LFW CemiFace
 ~~~
 
 ## Correlation Analysis
