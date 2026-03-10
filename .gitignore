@@ -1,5 +1,7 @@
 # Custom folders
 Ignore/*
+Pretrained_Models/*.pt
+Pretrained_Models/*.pth
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
