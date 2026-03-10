@@ -1,5 +1,7 @@
 # Synthetic Facial Recognition Benchmark
 
+[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+
 Reproduction package for TBD
 
 ## Real Datasets Installation 
@@ -28,28 +30,9 @@ Acquire synthetic datasets from their respective owners (sometimes it is a simpl
 - [SynMulti-PIE](https://www.idiap.ch/en/scientific-research/data/synmultipie)
 - MorphFace - contact authors
 
-and extract them:
+and extract them.
+Some datasets (e.g., Vec2Face, Digi2Real) need additional preprocessing to match common structure of a folder per identity.
 
-~~~
-# You can preview structure of the files with preview.sh script. 
-# If it matches structure_preview.txt, you can use directly extract .zip and .tar.gz files.
-
-chmod +x preview.sh
-./preview.sh 
-              
-chmod +x extractor.sh
-./extractor.sh  
-
-# In case of line endings compatibility problems use:
-dos2unix filename.sh
-# or
-sed -i 's/\r//' ./filename.sh
-~~~
-
-Some datasets (Vec2Face, Digi2Real) need additional preprocessing to match common structure of a folder per identity
-~~~
-TBD
-~~~
 
 ## Synthetic Datasets Preprocessing
 
