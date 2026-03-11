@@ -417,9 +417,12 @@ def stage_correlation(args, force: bool) -> bool:
     return _run([sys.executable, "eval_biometric_correlation.py"], args.dry_run)
 
 
-def stage_demographics(args) -> bool:
+def stage_demographics(args, force: bool = False) -> bool:
     _banner("Stage 4 — Demographic analysis  (age / gender)")
-    if DEMO_CSV.exists():
+    if force and DEMO_CSV.exists():
+        DEMO_CSV.unlink()
+        print(f"  [force] Deleted {DEMO_CSV.name}")
+    if not force and DEMO_CSV.exists():
         print(f"  [skip] {DEMO_CSV.name} exists.")
         return True
     cmd = [sys.executable, "demographic_analysis.py", "--resume"]
@@ -428,17 +431,17 @@ def stage_demographics(args) -> bool:
     return _run(cmd, args.dry_run)
 
 
-
-def stage_rank_consistency(args) -> bool:
+def stage_rank_consistency(args, force: bool = False) -> bool:
     _banner("Stage 5 — Rank consistency  (Spearman r + rank displacement)")
-
-    if RANK_STAB.exists():
+    if force and RANK_STAB.exists():
+        RANK_STAB.unlink()
+        print(f"  [force] Deleted {RANK_STAB.name}")
+    if not force and RANK_STAB.exists():
         print(f"  [skip] {RANK_STAB.name} exists.")
         return True
     if not BIO_METRICS.exists() and not args.dry_run:
         print(f"  [skip] {BIO_METRICS.name} not found — run stage 2 first.")
         return True
-
     cmd = [sys.executable, "eval_rank_consistency.py"]
     if args.no_synth:
         cmd += ["--split", "real"]
@@ -453,12 +456,35 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    # Orchestrator flags
+
+    # ── Per-stage skip flags ───────────────────────────────────────────────────
+    p.add_argument("--skip-inference",     action="store_true",
+                   help="Skip stage 1 (inference).")
+    p.add_argument("--skip-biometric",     action="store_true",
+                   help="Skip stage 2 (biometric metrics).")
+    p.add_argument("--skip-correlation",   action="store_true",
+                   help="Skip stage 3 (dataset correlations).")
+    p.add_argument("--skip-demographics",  action="store_true",
+                   help="Skip stage 4 (demographic analysis).")
+    p.add_argument("--skip-rank",          action="store_true",
+                   help="Skip stage 5 (rank consistency).")
+
+    # ── Per-stage force flags ──────────────────────────────────────────────────
+    p.add_argument("--force",              action="store_true",
+                   help="Force-rerun all stages.")
+    p.add_argument("--force-inference",    action="store_true",
+                   help="Force-rerun stage 1.")
+    p.add_argument("--force-biometric",    action="store_true",
+                   help="Force-rerun stage 2.")
+    p.add_argument("--force-correlation",  action="store_true",
+                   help="Force-rerun stage 3.")
+    p.add_argument("--force-demographics", action="store_true",
+                   help="Force-rerun stage 4.")
+    p.add_argument("--force-rank",         action="store_true",
+                   help="Force-rerun stage 5.")
+
+    # ── Inference options ──────────────────────────────────────────────────────
     p.add_argument("--parallel",           type=int, default=4, metavar="N")
-    p.add_argument("--force",              action="store_true")
-    p.add_argument("--force-inference",    action="store_true")
-    p.add_argument("--force-biometric",    action="store_true")
-    p.add_argument("--force-correlation",  action="store_true")
     p.add_argument("--no-ijb",             action="store_true")
     p.add_argument("--no-synth",           action="store_true")
     p.add_argument("--no-library-models",  action="store_true")
@@ -467,7 +493,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target", nargs="+",  default=["IJBB", "IJBC"],
                    choices=["IJBB", "IJBC"])
     p.add_argument("--dry-run",            action="store_true")
-    # Worker-only flags (not exposed in help)
+
+    # ── Worker-only flags (not exposed in help) ────────────────────────────────
     p.add_argument("--worker",             action="store_true",  help=argparse.SUPPRESS)
     p.add_argument("--model-name",         default=None,         help=argparse.SUPPRESS)
     p.add_argument("--model-path",         default=None,         help=argparse.SUPPRESS)
@@ -476,7 +503,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ijb-targets", nargs="+", default=["IJBB", "IJBC"],
                                                                   help=argparse.SUPPRESS)
     return p
-
 
 def main() -> None:
     args = _build_parser().parse_args()
@@ -489,20 +515,25 @@ def main() -> None:
     # ── Orchestrator entry point ──────────────────────────────────────────────
     t0 = time.time()
 
-    if not stage_inference(args, force=args.force or args.force_inference):
-        sys.exit(1)
+    if not args.skip_inference:
+        if not stage_inference(args, force=args.force or args.force_inference):
+            sys.exit(1)
 
-    if not stage_biometric(args, force=args.force or args.force_biometric):
-        sys.exit(1)
+    if not args.skip_biometric:
+        if not stage_biometric(args, force=args.force or args.force_biometric):
+            sys.exit(1)
 
-    if not stage_correlation(args, force=args.force or args.force_correlation):
-        sys.exit(1)
+    if not args.skip_correlation:
+        if not stage_correlation(args, force=args.force or args.force_correlation):
+            sys.exit(1)
 
-    if not stage_demographics(args):
-        sys.exit(1)
+    if not args.skip_demographics:
+        if not stage_demographics(args, force=args.force or args.force_demographics):
+            sys.exit(1)
 
-    if not stage_rank_consistency(args):
-        sys.exit(1)
+    if not args.skip_rank:
+        if not stage_rank_consistency(args, force=args.force or args.force_rank):
+            sys.exit(1)
 
     _banner(f"Pipeline complete  ({(time.time()-t0)/60:.1f} min)")
     print(f"  Outputs → {EVAL_DIR}/\n")
