@@ -1,12 +1,19 @@
 """
 eval_rank_consistency.py
 ─────────────────────────────────────────────────────────────────────────────
-Analyses how consistently models are ranked across datasets for each metric.
+Analyses how consistently datasets rank models, i.e. whether two datasets
+agree on which models are better.
 
-Three complementary views:
-  1. Spearman rank correlation heatmap  — are the orderings aligned?
-  2. Average rank displacement heatmap  — how many places does a model shift?
-  3. Per-model rank stability table     — which models rank consistently?
+Two core views (+ CI variants):
+  1. rank_spearman_<metric>.png        Spearman r between every dataset pair.
+                                       r=1: identical ranking. r=-1: reversed.
+  2. rank_displacement_<metric>.png    Mean |rank_i − rank_j| between every
+                                       dataset pair. 0 = identical ranking.
+                                       Max possible = (n_models-1)/2.
+
+  CI variants (bootstrap 95%, B=10,000):
+  3. rank_spearman_ci_<metric>.png     Spearman r annotated with [lo, hi].
+  4. rank_displacement_ci_<metric>.png Displacement annotated with [lo, hi].
 
 Input
 ─────
@@ -14,17 +21,19 @@ Input
 
 Output  (all written to Evaluation/)
 ──────
-  rank_spearman_<metric>.png      Spearman r heatmap per metric
-  rank_displacement_<metric>.png  Mean |rank_i − rank_j| heatmap per metric
-  rank_stability.csv              Per-model rank std + mean displacement
-  rank_stability.png              Heatmap: model × dataset rank matrix
+  rank_spearman_<metric>.png
+  rank_spearman_ci_<metric>.png
+  rank_displacement_<metric>.png
+  rank_displacement_ci_<metric>.png
+  rank_consistency.csv               Tidy table of all pairwise values + CIs
 
 Usage
 ─────
   python eval_rank_consistency.py
   python eval_rank_consistency.py --metrics EER FMR100
   python eval_rank_consistency.py --split real
-  python eval_rank_consistency.py --no-plots        # CSV output only
+  python eval_rank_consistency.py --no-ci        # skip bootstrap (faster)
+  python eval_rank_consistency.py --no-plots     # CSV output only
 """
 
 import argparse
@@ -37,12 +46,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# ── Optional matplotlib ───────────────────────────────────────────────────────
 try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import matplotlib.ticker as ticker
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
@@ -53,141 +60,167 @@ EVAL_DIR    = SCRIPT_DIR / "Evaluation"
 BIO_METRICS = EVAL_DIR / "biometric_metrics.csv"
 OUT_DIR     = EVAL_DIR
 
-ALL_METRICS = ["EER", "FMR100", "FMR1000", "ZeroFMR", "TAR@FAR1", "TAR@FAR01"]
-# For TAR metrics higher is better; for the rest lower is better
+ALL_METRICS      = ["EER", "FMR100", "FMR1000", "ZeroFMR", "TAR@FAR1", "TAR@FAR01"]
 HIGHER_IS_BETTER = {"TAR@FAR1", "TAR@FAR01"}
+BOOTSTRAP_B      = 10_000
+BOOTSTRAP_SEED   = 42
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_metrics(path: Path, split_filter: str | None, metric_filter: list[str]) -> pd.DataFrame:
+def load_metrics(path: Path, split_filter: str | None,
+                 metric_filter: list[str]) -> pd.DataFrame:
     if not path.exists():
         print(f"[error] {path} not found.")
         sys.exit(1)
-
     df = pd.read_csv(path)
     if split_filter:
         df = df[df["split"] == split_filter]
-
-    # Melt wide → long so each row is (model, dataset, metric, value)
     id_cols  = ["split", "model", "dataset"]
     val_cols = [c for c in ALL_METRICS if c in df.columns]
-    df = df[id_cols + val_cols].copy()
-    df = df.melt(id_vars=id_cols, value_vars=val_cols,
-                 var_name="metric", value_name="value")
+    df = df[id_cols + val_cols].melt(id_vars=id_cols, value_vars=val_cols,
+                                      var_name="metric", value_name="value")
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     df = df.dropna(subset=["value"])
-
     if metric_filter:
         df = df[df["metric"].isin(metric_filter)]
-
     return df
 
 
-def build_pivot(df: pd.DataFrame, metric: str) -> pd.DataFrame:
+def build_ranked(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, int]:
     """
-    Returns a DataFrame indexed by model, columns = datasets,
-    values = metric score.  Only models present in ALL datasets are kept
-    so that rankings are directly comparable.
+    Returns (ranked, n_real):
+      ranked  — models x datasets matrix of ranks (1 = best),
+                columns ordered real-first then synth.
+      n_real  — number of real dataset columns (used for separator line).
+    Only models present in every dataset are kept.
     """
-    sub = df[df["metric"] == metric].copy()
-    pivot = sub.pivot_table(index="model", columns="dataset",
-                            values="value", aggfunc="mean")
-    # Drop models with any missing dataset
-    pivot = pivot.dropna()
-    return pivot
+    sub      = df[df["metric"] == metric].copy()
+    real_ds  = sorted(sub[sub["split"] == "real" ]["dataset"].unique())
+    synth_ds = sorted(sub[sub["split"] == "synth"]["dataset"].unique())
+    ordered  = real_ds + synth_ds
 
+    pivot   = sub.pivot_table(index="model", columns="dataset",
+                              values="value", aggfunc="mean")
+    ordered = [c for c in ordered if c in pivot.columns]
+    pivot   = pivot[ordered].dropna()
 
-def rank_pivot(pivot: pd.DataFrame, metric: str) -> pd.DataFrame:
-    """
-    Convert scores to ranks (1 = best).
-    For EER/FMR* lower score is better → rank ascending.
-    For TAR*  higher score is better   → rank descending.
-    """
     ascending = metric not in HIGHER_IS_BETTER
-    ranked = pivot.rank(axis=0, ascending=ascending, method="average")
-    return ranked
+    ranked    = pivot.rank(axis=0, ascending=ascending, method="average")
+    n_real    = len([c for c in real_ds if c in pivot.columns])
+    return ranked, n_real
 
 
-# ── Analysis functions ────────────────────────────────────────────────────────
+# ── Pairwise metrics ──────────────────────────────────────────────────────────
 
-def spearman_matrix(ranked: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Pairwise Spearman r and p-value between all dataset columns."""
-    datasets = ranked.columns.tolist()
-    n = len(datasets)
-    r_mat = np.ones((n, n))
+def pairwise_spearman(ranked: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Spearman r and p-value for every dataset pair."""
+    ds    = ranked.columns.tolist()
+    n     = len(ds)
+    r_mat = np.eye(n)
     p_mat = np.zeros((n, n))
     for i, j in combinations(range(n), 2):
         r, p = stats.spearmanr(ranked.iloc[:, i], ranked.iloc[:, j])
         r_mat[i, j] = r_mat[j, i] = r
         p_mat[i, j] = p_mat[j, i] = p
-    r_df = pd.DataFrame(r_mat, index=datasets, columns=datasets)
-    p_df = pd.DataFrame(p_mat, index=datasets, columns=datasets)
-    return r_df, p_df
+    return (pd.DataFrame(r_mat, index=ds, columns=ds),
+            pd.DataFrame(p_mat, index=ds, columns=ds))
 
 
-def displacement_matrix(ranked: pd.DataFrame) -> pd.DataFrame:
-    """Mean absolute rank difference between all dataset pairs."""
-    datasets = ranked.columns.tolist()
-    n = len(datasets)
+def pairwise_displacement(ranked: pd.DataFrame) -> pd.DataFrame:
+    """Mean absolute rank difference for every dataset pair."""
+    ds  = ranked.columns.tolist()
+    n   = len(ds)
     mat = np.zeros((n, n))
     for i, j in combinations(range(n), 2):
         d = np.abs(ranked.iloc[:, i].values - ranked.iloc[:, j].values).mean()
         mat[i, j] = mat[j, i] = d
-    return pd.DataFrame(mat, index=datasets, columns=datasets)
+    return pd.DataFrame(mat, index=ds, columns=ds)
 
 
-def stability_table(ranked: pd.DataFrame) -> pd.DataFrame:
+def bootstrap_ci_matrices(ranked: pd.DataFrame,
+                           B: int = BOOTSTRAP_B,
+                           seed: int = BOOTSTRAP_SEED,
+                           alpha: float = 0.05,
+                           ) -> dict[str, tuple[pd.DataFrame, pd.DataFrame]]:
     """
-    Per-model rank stability:
-      rank_std   — std of ranks across all datasets (0 = perfectly stable)
-      rank_range — max rank − min rank
-      mean_rank  — average rank across datasets
-      datasets   — number of datasets the model appears in
+    Bootstrap 95% CIs for Spearman r and mean displacement simultaneously.
+    Resamples models (rows) with replacement B times.
+    Returns {'spearman': (lo_df, hi_df), 'displacement': (lo_df, hi_df)}.
     """
-    tbl = pd.DataFrame({
-        "mean_rank":  ranked.mean(axis=1),
-        "rank_std":   ranked.std(axis=1),
-        "rank_range": ranked.max(axis=1) - ranked.min(axis=1),
-        "n_datasets": ranked.notna().sum(axis=1),
-    }).sort_values("rank_std")
-    return tbl
+    ds       = ranked.columns.tolist()
+    n_ds     = len(ds)
+    n_models = len(ranked)
+    rng      = np.random.default_rng(seed)
+    arr      = ranked.values
+    pairs    = list(combinations(range(n_ds), 2))
+
+    r_boot = np.empty((B, len(pairs)))
+    d_boot = np.empty((B, len(pairs)))
+
+    for b in range(B):
+        idx    = rng.integers(0, n_models, size=n_models)
+        sample = arr[idx]
+        for k, (i, j) in enumerate(pairs):
+            r, _         = stats.spearmanr(sample[:, i], sample[:, j])
+            r_boot[b, k] = r
+            d_boot[b, k] = np.abs(sample[:, i] - sample[:, j]).mean()
+
+    def _to_dfs(boot):
+        lo_mat = np.eye(len(ds))
+        hi_mat = np.ones((len(ds), len(ds)))
+        for k, (i, j) in enumerate(pairs):
+            lo = float(np.percentile(boot[:, k], 100 * alpha / 2))
+            hi = float(np.percentile(boot[:, k], 100 * (1 - alpha / 2)))
+            lo_mat[i, j] = lo_mat[j, i] = lo
+            hi_mat[i, j] = hi_mat[j, i] = hi
+        return (pd.DataFrame(lo_mat, index=ds, columns=ds),
+                pd.DataFrame(hi_mat, index=ds, columns=ds))
+
+    return {
+        "spearman":     _to_dfs(r_boot),
+        "displacement": _to_dfs(d_boot),
+    }
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def _fig_size(n: int) -> tuple[float, float]:
-    base = max(6, n * 0.7)
+    base = max(6, n * 0.75)
     return base + 2, base
 
 
-def plot_heatmap(matrix: pd.DataFrame,
-                 title: str,
-                 out_path: Path,
-                 cmap: str = "RdBu_r",
-                 vmin: float = -1.0,
-                 vmax: float = 1.0,
-                 fmt: str = ".2f",
-                 annot_size: int = 7) -> None:
-    n = len(matrix)
+def _draw_separator(ax, split_at: int, n: int) -> None:
+    if 0 < split_at < n:
+        kw = dict(color="black", linewidth=2.0)
+        ax.axhline(split_at - 0.5, **kw)
+        ax.axvline(split_at - 0.5, **kw)
+
+
+def _base_heatmap(matrix, cmap, vmin, vmax, split_at):
+    n   = len(matrix)
     fig, ax = plt.subplots(figsize=_fig_size(n))
-
-    im = ax.imshow(matrix.values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+    im  = ax.imshow(matrix.values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
     plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-
-    ax.set_xticks(range(n))
-    ax.set_yticks(range(n))
+    ax.set_xticks(range(n)); ax.set_yticks(range(n))
     ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=8)
     ax.set_yticklabels(matrix.index, fontsize=8)
+    _draw_separator(ax, split_at, n)
+    return fig, ax, (vmin + vmax) / 2, (vmax - vmin)
 
+
+def plot_heatmap(matrix: pd.DataFrame, title: str, out_path: Path,
+                 cmap: str, vmin: float, vmax: float,
+                 fmt: str, split_at: int) -> None:
+    fig, ax, mid, span = _base_heatmap(matrix, cmap, vmin, vmax, split_at)
+    n = len(matrix)
+    annot_size = max(6, 9 - n // 4)
     for i in range(n):
         for j in range(n):
-            val = matrix.values[i, j]
-            txt = format(val, fmt)
-            color = "white" if abs(val - (vmin + vmax) / 2) > (vmax - vmin) * 0.3 else "black"
-            ax.text(j, i, txt, ha="center", va="center",
+            v     = matrix.values[i, j]
+            color = "white" if abs(v - mid) > span * 0.3 else "black"
+            ax.text(j, i, format(v, fmt), ha="center", va="center",
                     fontsize=annot_size, color=color)
-
     ax.set_title(title, fontsize=11, pad=12)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -195,74 +228,76 @@ def plot_heatmap(matrix: pd.DataFrame,
     print(f"  Saved → {out_path.name}")
 
 
-def plot_rank_matrix(ranked: pd.DataFrame, metric: str, out_path: Path) -> None:
-    """Heatmap of raw ranks: rows=models, columns=datasets."""
-    n_models, n_ds = ranked.shape
-    fig, ax = plt.subplots(figsize=(max(8, n_ds * 0.9), max(6, n_models * 0.4)))
-
-    im = ax.imshow(ranked.values, cmap="RdYlGn_r", aspect="auto",
-                   vmin=1, vmax=n_models)
-    plt.colorbar(im, ax=ax, fraction=0.02, pad=0.02, label="Rank (1 = best)")
-
-    ax.set_xticks(range(n_ds))
-    ax.set_yticks(range(n_models))
-    ax.set_xticklabels(ranked.columns, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(ranked.index, fontsize=7)
-
-    for i in range(n_models):
-        for j in range(n_ds):
-            val = ranked.values[i, j]
-            ax.text(j, i, f"{val:.0f}", ha="center", va="center",
-                    fontsize=6, color="black")
-
-    ax.set_title(f"Model ranks per dataset — {metric}\n(sorted by rank stability)",
-                 fontsize=11, pad=12)
+def plot_heatmap_ci(matrix: pd.DataFrame, ci_lo: pd.DataFrame,
+                    ci_hi: pd.DataFrame, title: str, out_path: Path,
+                    cmap: str, vmin: float, vmax: float,
+                    split_at: int) -> None:
+    fig, ax, mid, span = _base_heatmap(matrix, cmap, vmin, vmax, split_at)
+    n          = len(matrix)
+    annot_size = max(5, 8 - n // 4)
+    for i in range(n):
+        for j in range(n):
+            v     = matrix.values[i, j]
+            lo    = ci_lo.values[i, j]
+            hi    = ci_hi.values[i, j]
+            color = "white" if abs(v - mid) > span * 0.3 else "black"
+            ax.text(j, i, f"{v:.2f}\n[{lo:.2f}, {hi:.2f}]",
+                    ha="center", va="center", fontsize=annot_size,
+                    color=color, linespacing=1.3)
+    ax.set_title(title, fontsize=11, pad=12)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {out_path.name}")
 
 
-def plot_stability_bar(stab: pd.DataFrame, metric: str, out_path: Path) -> None:
-    """Horizontal bar chart of rank_std per model."""
-    fig, ax = plt.subplots(figsize=(8, max(4, len(stab) * 0.35)))
-    colors = plt.cm.RdYlGn_r(
-        (stab["rank_std"] - stab["rank_std"].min()) /
-        (stab["rank_std"].max() - stab["rank_std"].min() + 1e-9)
-    )
-    ax.barh(stab.index, stab["rank_std"], color=colors)
-    ax.set_xlabel("Rank std across datasets (lower = more stable)")
-    ax.set_title(f"Model rank stability — {metric}", fontsize=11)
-    ax.invert_yaxis()
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  Saved → {out_path.name}")
+# ── Output CSV ────────────────────────────────────────────────────────────────
+
+def build_output_rows(metric, r_df, p_df, disp_df,
+                      r_lo, r_hi, d_lo, d_hi, n_models) -> list[dict]:
+    rows = []
+    for ds_x, ds_y in combinations(r_df.columns, 2):
+        row = {
+            "metric":     metric,
+            "dataset_x":  ds_x,
+            "dataset_y":  ds_y,
+            "n_models":   n_models,
+            "spearman_r": round(r_df.loc[ds_x, ds_y], 6),
+            "spearman_p": round(p_df.loc[ds_x, ds_y], 6),
+            "mean_disp":  round(disp_df.loc[ds_x, ds_y], 4),
+        }
+        if r_lo is not None:
+            row["spearman_ci_lo"] = round(r_lo.loc[ds_x, ds_y], 6)
+            row["spearman_ci_hi"] = round(r_hi.loc[ds_x, ds_y], 6)
+            row["disp_ci_lo"]     = round(d_lo.loc[ds_x, ds_y], 4)
+            row["disp_ci_hi"]     = round(d_hi.loc[ds_x, ds_y], 4)
+        rows.append(row)
+    return rows
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Analyse model rank consistency across datasets.",
+        description="Analyse how consistently datasets rank models.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--metrics", nargs="+", default=ALL_METRICS,
-                        metavar="M", help="Metrics to analyse (default: all).")
-    parser.add_argument("--split", default=None, metavar="S",
+    parser.add_argument("--metrics",     nargs="+", default=ALL_METRICS, metavar="M")
+    parser.add_argument("--split",       default=None, metavar="S",
                         help="Filter to one split: real / synth (default: all).")
-    parser.add_argument("--input", default=str(BIO_METRICS), metavar="PATH",
-                        help=f"Input CSV (default: {BIO_METRICS}).")
-    parser.add_argument("--out-dir", default=str(OUT_DIR), metavar="PATH",
-                        help=f"Output directory (default: {OUT_DIR}).")
-    parser.add_argument("--no-plots", action="store_true",
-                        help="Skip plot generation, write CSVs only.")
-    parser.add_argument("--min-datasets", type=int, default=2, metavar="N",
-                        help="Min datasets a model must appear in (default: 2).")
+    parser.add_argument("--input",       default=str(BIO_METRICS), metavar="PATH")
+    parser.add_argument("--out-dir",     default=str(OUT_DIR),     metavar="PATH")
+    parser.add_argument("--no-ci",       action="store_true",
+                        help="Skip bootstrap CI computation (faster).")
+    parser.add_argument("--no-plots",    action="store_true",
+                        help="Skip plot generation, write CSV only.")
+    parser.add_argument("--bootstrap-b", type=int, default=BOOTSTRAP_B, metavar="B",
+                        help=f"Bootstrap resamples (default: {BOOTSTRAP_B}).")
     args = parser.parse_args()
 
     do_plots = not args.no_plots and HAS_MPL
+    do_ci    = not args.no_ci
     if not args.no_plots and not HAS_MPL:
         print("[warn] matplotlib not available — skipping plots.")
 
@@ -272,101 +307,92 @@ def main() -> None:
     print(f"Loading {args.input} ...")
     df = load_metrics(Path(args.input), args.split, args.metrics)
 
-    all_stability = []
+    all_rows = []
 
     for metric in args.metrics:
-        pivot = build_pivot(df, metric)
-        if pivot.empty:
-            print(f"  [skip] {metric}: no data.")
+        ranked, n_real = build_ranked(df, metric)
+        if ranked.empty or len(ranked) < 3 or len(ranked.columns) < 2:
+            print(f"  [skip] {metric}: insufficient data.")
             continue
 
-        # Filter models that appear in enough datasets
-        pivot = pivot[pivot.notna().sum(axis=1) >= args.min_datasets]
-        if len(pivot) < 3:
-            print(f"  [skip] {metric}: fewer than 3 models with sufficient data.")
-            continue
-
-        ranked = rank_pivot(pivot, metric)
-        # Sort models by rank stability for readability
-        stab = stability_table(ranked)
-        ranked = ranked.loc[stab.index]
-
-        n_models  = len(ranked)
+        n_models   = len(ranked)
         n_datasets = len(ranked.columns)
-        print(f"\n── {metric}  ({n_models} models × {n_datasets} datasets) ──")
+        print(f"\n── {metric}  ({n_models} models x {n_datasets} datasets) ──")
 
-        # 1. Spearman heatmap
-        r_df, p_df = spearman_matrix(ranked)
-        print("  Spearman r (dataset pairs):")
-        for (ds_x, ds_y) in combinations(r_df.columns, 2):
+        r_df, p_df = pairwise_spearman(ranked)
+        disp_df    = pairwise_displacement(ranked)
+
+        r_lo = r_hi = d_lo = d_hi = None
+        if do_ci:
+            print(f"  Computing bootstrap CIs (B={args.bootstrap_b:,}) ...")
+            cis       = bootstrap_ci_matrices(ranked, B=args.bootstrap_b)
+            r_lo, r_hi = cis["spearman"]
+            d_lo, d_hi = cis["displacement"]
+
+        # Console summary
+        print(f"  {'Dataset pair':<43} {'Spearman r':>10}  {'mean |Δrank|':>12}")
+        print(f"  {'-'*43} {'-'*10}  {'-'*12}")
+        for ds_x, ds_y in combinations(r_df.columns, 2):
             r = r_df.loc[ds_x, ds_y]
             p = p_df.loc[ds_x, ds_y]
-            stars = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else ""
-            print(f"    {ds_x:<20} vs {ds_y:<20}  r={r:+.3f}  p={p:.4f} {stars}")
-
-        if do_plots:
-            plot_heatmap(
-                r_df,
-                title=f"Rank correlation (Spearman r) — {metric}\n"
-                      f"{n_models} models, lower rank = better model",
-                out_path=out_dir / f"rank_spearman_{metric}.png",
-                cmap="RdBu_r", vmin=-1, vmax=1, fmt=".2f",
-            )
-
-        # 2. Displacement heatmap
-        disp_df = displacement_matrix(ranked)
-        print("  Mean rank displacement (dataset pairs):")
-        for (ds_x, ds_y) in combinations(disp_df.columns, 2):
             d = disp_df.loc[ds_x, ds_y]
-            print(f"    {ds_x:<20} vs {ds_y:<20}  mean |Δrank| = {d:.2f}")
+            stars = "***" if p < 0.001 else "** " if p < 0.01 else "*  " if p < 0.05 else "   "
+            print(f"  {ds_x:<20} vs {ds_y:<20}  {r:+.3f}{stars}  {d:>8.2f}")
 
-        if do_plots:
-            vmax_disp = max(1.0, disp_df.values.max())
-            plot_heatmap(
-                disp_df,
-                title=f"Mean absolute rank displacement — {metric}\n"
-                      f"Average positions a model shifts between datasets",
-                out_path=out_dir / f"rank_displacement_{metric}.png",
-                cmap="YlOrRd", vmin=0, vmax=vmax_disp, fmt=".1f",
-            )
+        all_rows.extend(build_output_rows(
+            metric, r_df, p_df, disp_df, r_lo, r_hi, d_lo, d_hi, n_models))
 
-        # 3. Raw rank matrix
-        if do_plots:
-            plot_rank_matrix(
-                ranked, metric,
-                out_path=out_dir / f"rank_matrix_{metric}.png",
-            )
-            plot_stability_bar(
-                stab, metric,
-                out_path=out_dir / f"rank_stability_bar_{metric}.png",
-            )
+        if not do_plots:
+            continue
 
-        # Accumulate stability
-        stab_metric = stab[["mean_rank", "rank_std", "rank_range"]].copy()
-        stab_metric.columns = [f"{metric}_{c}" for c in stab_metric.columns]
-        stab_metric.index.name = "model"
-        all_stability.append(stab_metric)
+        vmax_disp  = max(1.0, disp_df.values.max())
+        max_rank   = (n_models - 1) / 2
 
-    # 4. Combined stability CSV
-    if all_stability:
-        combined = all_stability[0]
-        for s in all_stability[1:]:
-            combined = combined.join(s, how="outer")
-        out_csv = out_dir / "rank_stability.csv"
-        combined.to_csv(out_csv)
-        print(f"\nWrote rank stability table → {out_csv.name}")
+        plot_heatmap(
+            r_df,
+            title=(f"Dataset rank correlation (Spearman r) — {metric}\n"
+                   f"{n_models} models  |  r=+1: identical ranking   r=-1: reversed"),
+            out_path=out_dir / f"rank_spearman_{metric}.png",
+            cmap="RdBu_r", vmin=-1, vmax=1, fmt=".2f", split_at=n_real,
+        )
 
-        # Console summary: overall most/least stable models
-        std_cols = [c for c in combined.columns if c.endswith("_rank_std")]
-        if std_cols:
-            combined["overall_rank_std"] = combined[std_cols].mean(axis=1)
-            combined_sorted = combined.sort_values("overall_rank_std")
-            print("\nMost stable models (lowest mean rank std across all metrics):")
-            for model, row in combined_sorted.head(5).iterrows():
-                print(f"  {model:<40}  rank_std = {row['overall_rank_std']:.2f}")
-            print("\nLeast stable models:")
-            for model, row in combined_sorted.tail(5).iterrows():
-                print(f"  {model:<40}  rank_std = {row['overall_rank_std']:.2f}")
+        plot_heatmap(
+            disp_df,
+            title=(f"Mean absolute rank displacement — {metric}\n"
+                   f"Average positions a model shifts between datasets"
+                   f"  (0 = identical,  max \u2248 {max_rank:.0f})"),
+            out_path=out_dir / f"rank_displacement_{metric}.png",
+            cmap="YlOrRd", vmin=0, vmax=vmax_disp, fmt=".1f", split_at=n_real,
+        )
+
+        if not do_ci:
+            continue
+
+        plot_heatmap_ci(
+            r_df, r_lo, r_hi,
+            title=(f"Dataset rank correlation (Spearman r) with 95% bootstrap CI — {metric}\n"
+                   f"{n_models} models  |  B={args.bootstrap_b:,} resamples"),
+            out_path=out_dir / f"rank_spearman_ci_{metric}.png",
+            cmap="RdBu_r", vmin=-1, vmax=1, split_at=n_real,
+        )
+
+        plot_heatmap_ci(
+            disp_df, d_lo, d_hi,
+            title=(f"Mean absolute rank displacement with 95% bootstrap CI — {metric}\n"
+                   f"{n_models} models  |  B={args.bootstrap_b:,} resamples"),
+            out_path=out_dir / f"rank_displacement_ci_{metric}.png",
+            cmap="YlOrRd", vmin=0, vmax=vmax_disp, split_at=n_real,
+        )
+
+    # Write combined CSV
+    if all_rows:
+        out_csv    = out_dir / "rank_consistency.csv"
+        fieldnames = list(all_rows[0].keys())
+        with open(out_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(all_rows)
+        print(f"\nWrote {len(all_rows)} rows -> {out_csv.name}")
 
 
 if __name__ == "__main__":
