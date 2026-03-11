@@ -87,13 +87,17 @@ def load_metrics(path: Path, split_filter: str | None,
     return df
 
 
-def build_ranked(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, int]:
+def build_ranked(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, list[str]]:
     """
-    Returns (ranked, n_real):
-      ranked  — models x datasets matrix of ranks (1 = best),
-                columns ordered real-first then synth.
-      n_real  — number of real dataset columns (used for separator line).
-    Only models present in every dataset are kept.
+    Returns (ranked, real_cols):
+      ranked    — models x all-datasets matrix of ranks (1=best),
+                  columns ordered real-first then synth.
+                  Only models present in every dataset are kept.
+      real_cols — list of real dataset column names (used to slice y-axis).
+
+    Y-axis shows only real datasets (no redundant synth-vs-synth pairs).
+    X-axis shows all datasets (real + synth) so real-vs-synth cross-comparisons
+    are preserved.
     """
     sub      = df[df["metric"] == metric].copy()
     real_ds  = sorted(sub[sub["split"] == "real" ]["dataset"].unique())
@@ -107,8 +111,10 @@ def build_ranked(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, int]:
 
     ascending = metric not in HIGHER_IS_BETTER
     ranked    = pivot.rank(axis=0, ascending=ascending, method="average")
-    n_real    = len([c for c in real_ds if c in pivot.columns])
-    return ranked, n_real
+
+    real_cols = [c for c in real_ds if c in pivot.columns]
+    n_real    = len(real_cols)
+    return ranked, real_cols, n_real
 
 
 # ── Pairwise metrics ──────────────────────────────────────────────────────────
@@ -178,9 +184,11 @@ def bootstrap_ci_matrices(ranked: pd.DataFrame,
         # sample[:, ix] shape (n_models, n_pairs), same for jx
         d_boot[b]    = np.abs(sample[:, ix] - sample[:, jx]).mean(axis=0)
 
-    def _to_dfs(boot):
-        lo_mat = np.eye(n_ds)
-        hi_mat = np.ones((n_ds, n_ds))
+    def _to_dfs(boot, diag_val: float = 1.0):
+        lo_mat = np.full((n_ds, n_ds), diag_val)
+        hi_mat = np.full((n_ds, n_ds), diag_val)
+        np.fill_diagonal(lo_mat, diag_val)
+        np.fill_diagonal(hi_mat, diag_val)
         lo_vals = np.percentile(boot, 100 * alpha / 2,       axis=0)
         hi_vals = np.percentile(boot, 100 * (1 - alpha / 2), axis=0)
         for k, (i, j) in enumerate(pairs):
@@ -189,51 +197,55 @@ def bootstrap_ci_matrices(ranked: pd.DataFrame,
         return (pd.DataFrame(lo_mat, index=ds, columns=ds),
                 pd.DataFrame(hi_mat, index=ds, columns=ds))
 
+    r_lo, r_hi = _to_dfs(r_boot, diag_val=1.0)   # Spearman diagonal = [1, 1]
+    d_lo, d_hi = _to_dfs(d_boot, diag_val=0.0)   # displacement diagonal = [0, 0]
     return {
-        "spearman":     _to_dfs(r_boot),
-        "displacement": _to_dfs(d_boot),
+        "spearman":     (r_lo, r_hi),
+        "displacement": (d_lo, d_hi),
     }
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
-def _fig_size(n: int) -> tuple[float, float]:
-    base = max(6, n * 0.75)
-    return base + 2, base
 
 
-def _draw_separator(ax, split_at: int, n: int) -> None:
-    if 0 < split_at < n:
-        kw = dict(color="black", linewidth=2.0)
-        ax.axhline(split_at - 0.5, **kw)
-        ax.axvline(split_at - 0.5, **kw)
-
-
-def _base_heatmap(matrix, cmap, vmin, vmax, split_at):
-    n   = len(matrix)
-    fig, ax = plt.subplots(figsize=_fig_size(n))
-    im  = ax.imshow(matrix.values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+def _base_heatmap(matrix, cmap, vmin, vmax, n_real: int = 0):
+    """
+    matrix: pd.DataFrame with shape (n_rows, n_cols).
+            rows  = y-axis labels (real datasets only)
+            cols  = x-axis labels (all datasets: real + synth)
+    n_real: draw a vertical separator after this many columns (0 = none).
+    """
+    n_rows, n_cols = matrix.shape
+    w = max(6, n_cols * 0.85) + 2
+    h = max(4, n_rows * 0.85) + 1
+    fig, ax = plt.subplots(figsize=(w, h))
+    im = ax.imshow(matrix.values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
     plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    ax.set_xticks(range(n)); ax.set_yticks(range(n))
-    ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=8)
-    ax.set_yticklabels(matrix.index, fontsize=8)
-    _draw_separator(ax, split_at, n)
+    ax.set_xticks(range(n_cols))
+    ax.set_yticks(range(n_rows))
+    ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=9, color="black")
+    ax.set_yticklabels(matrix.index,   fontsize=9, color="black")
+    ax.tick_params(colors="black")
+    if 0 < n_real < n_cols:
+        ax.axvline(n_real - 0.5, color="black", linewidth=2.0)
     return fig, ax, (vmin + vmax) / 2, (vmax - vmin)
 
 
 def plot_heatmap(matrix: pd.DataFrame, title: str, out_path: Path,
                  cmap: str, vmin: float, vmax: float,
-                 fmt: str, split_at: int) -> None:
-    fig, ax, mid, span = _base_heatmap(matrix, cmap, vmin, vmax, split_at)
-    n = len(matrix)
-    annot_size = max(6, 9 - n // 4)
-    for i in range(n):
-        for j in range(n):
-            v     = matrix.values[i, j]
-            color = "white" if abs(v - mid) > span * 0.3 else "black"
+                 fmt: str, real_rows: list[str], n_real: int = 0) -> None:
+    rect = matrix.loc[real_rows, :]
+    fig, ax, mid, span = _base_heatmap(rect, cmap, vmin, vmax, n_real)
+    n_rows, n_cols = rect.shape
+    annot_size = max(8, 11 - n_cols // 4)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v     = rect.values[i, j]
+            color = "white" if v > 0.5 * vmax else "black"
             ax.text(j, i, format(v, fmt), ha="center", va="center",
                     fontsize=annot_size, color=color)
-    ax.set_title(title, fontsize=11, pad=12)
+    ax.set_title(title, fontsize=11, pad=12, color="black")
     fig.tight_layout()
     fig.savefig(out_path, dpi=500, bbox_inches="tight")
     plt.close(fig)
@@ -243,20 +255,23 @@ def plot_heatmap(matrix: pd.DataFrame, title: str, out_path: Path,
 def plot_heatmap_ci(matrix: pd.DataFrame, ci_lo: pd.DataFrame,
                     ci_hi: pd.DataFrame, title: str, out_path: Path,
                     cmap: str, vmin: float, vmax: float,
-                    split_at: int) -> None:
-    fig, ax, mid, span = _base_heatmap(matrix, cmap, vmin, vmax, split_at)
-    n          = len(matrix)
-    annot_size = max(5, 8 - n // 4)
-    for i in range(n):
-        for j in range(n):
-            v     = matrix.values[i, j]
-            lo    = ci_lo.values[i, j]
-            hi    = ci_hi.values[i, j]
-            color = "white" if abs(v - mid) > span * 0.3 else "black"
+                    real_rows: list[str], n_real: int = 0) -> None:
+    rect    = matrix.loc[real_rows, :]
+    rect_lo = ci_lo.loc[real_rows, :]
+    rect_hi = ci_hi.loc[real_rows, :]
+    fig, ax, mid, span = _base_heatmap(rect, cmap, vmin, vmax, n_real)
+    n_rows, n_cols = rect.shape
+    annot_size = max(7, 10 - n_cols // 4)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v     = rect.values[i, j]
+            lo    = rect_lo.values[i, j]
+            hi    = rect_hi.values[i, j]
+            color = "white" if v > 0.5 * vmax else "black"
             ax.text(j, i, f"{v:.2f}\n[{lo:.2f}, {hi:.2f}]",
                     ha="center", va="center", fontsize=annot_size,
                     color=color, linespacing=1.3)
-    ax.set_title(title, fontsize=11, pad=12)
+    ax.set_title(title, fontsize=11, pad=12, color="black")
     fig.tight_layout()
     fig.savefig(out_path, dpi=500, bbox_inches="tight")
     plt.close(fig)
@@ -322,7 +337,7 @@ def main() -> None:
     all_rows = []
 
     for metric in args.metrics:
-        ranked, n_real = build_ranked(df, metric)
+        ranked, real_cols, n_real = build_ranked(df, metric)
         if ranked.empty or len(ranked) < 3 or len(ranked.columns) < 2:
             print(f"  [skip] {metric}: insufficient data.")
             continue
@@ -365,7 +380,8 @@ def main() -> None:
             title=(f"Dataset rank correlation (Spearman r) — {metric}\n"
                    f"{n_models} models  |  r=+1: identical ranking   r=-1: reversed"),
             out_path=out_dir / f"rank_spearman_{metric}.png",
-            cmap="RdBu_r", vmin=-1, vmax=1, fmt=".2f", split_at=n_real,
+            cmap="RdBu_r", vmin=-1, vmax=1, fmt=".2f",
+            real_rows=real_cols, n_real=n_real,
         )
 
         plot_heatmap(
@@ -374,7 +390,8 @@ def main() -> None:
                    f"Average positions a model shifts between datasets"
                    f"  (0 = identical,  max \u2248 {max_rank:.0f})"),
             out_path=out_dir / f"rank_displacement_{metric}.png",
-            cmap="YlOrRd", vmin=0, vmax=vmax_disp, fmt=".1f", split_at=n_real,
+            cmap="YlOrRd", vmin=0, vmax=vmax_disp, fmt=".1f",
+            real_rows=real_cols, n_real=n_real,
         )
 
         if not do_ci:
@@ -385,7 +402,8 @@ def main() -> None:
             title=(f"Dataset rank correlation (Spearman r) with 95% bootstrap CI — {metric}\n"
                    f"{n_models} models  |  B={args.bootstrap_b:,} resamples"),
             out_path=out_dir / f"rank_spearman_ci_{metric}.png",
-            cmap="RdBu_r", vmin=-1, vmax=1, split_at=n_real,
+            cmap="RdBu_r", vmin=-1, vmax=1,
+            real_rows=real_cols, n_real=n_real,
         )
 
         plot_heatmap_ci(
@@ -393,7 +411,8 @@ def main() -> None:
             title=(f"Mean absolute rank displacement with 95% bootstrap CI — {metric}\n"
                    f"{n_models} models  |  B={args.bootstrap_b:,} resamples"),
             out_path=out_dir / f"rank_displacement_ci_{metric}.png",
-            cmap="YlOrRd", vmin=0, vmax=vmax_disp, split_at=n_real,
+            cmap="YlOrRd", vmin=0, vmax=vmax_disp,
+            real_rows=real_cols, n_real=n_real,
         )
 
     # Write combined CSV
