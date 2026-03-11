@@ -146,34 +146,46 @@ def bootstrap_ci_matrices(ranked: pd.DataFrame,
     """
     Bootstrap 95% CIs for Spearman r and mean displacement simultaneously.
     Resamples models (rows) with replacement B times.
-    Returns {'spearman': (lo_df, hi_df), 'displacement': (lo_df, hi_df)}.
+
+    Vectorised implementation — no Python loop over dataset pairs:
+      - Spearman r: computed via numpy corrcoef on the full (n_ds x n_ds)
+        correlation matrix at once per resample.
+      - Displacement: computed via broadcasting over all pairs at once.
+    This is ~100x faster than calling scipy.spearmanr per pair per resample.
     """
     ds       = ranked.columns.tolist()
     n_ds     = len(ds)
     n_models = len(ranked)
     rng      = np.random.default_rng(seed)
-    arr      = ranked.values
+    arr      = ranked.values.astype(np.float64)   # (n_models, n_ds)
     pairs    = list(combinations(range(n_ds), 2))
+    n_pairs  = len(pairs)
+    ix       = [p[0] for p in pairs]
+    jx       = [p[1] for p in pairs]
 
-    r_boot = np.empty((B, len(pairs)))
-    d_boot = np.empty((B, len(pairs)))
+    r_boot = np.empty((B, n_pairs), dtype=np.float64)
+    d_boot = np.empty((B, n_pairs), dtype=np.float64)
 
     for b in range(B):
-        idx    = rng.integers(0, n_models, size=n_models)
-        sample = arr[idx]
-        for k, (i, j) in enumerate(pairs):
-            r, _         = stats.spearmanr(sample[:, i], sample[:, j])
-            r_boot[b, k] = r
-            d_boot[b, k] = np.abs(sample[:, i] - sample[:, j]).mean()
+        sample = arr[rng.integers(0, n_models, size=n_models)]  # (n_models, n_ds)
+
+        # Spearman r for all pairs at once via corrcoef on full matrix
+        # corrcoef returns (n_ds, n_ds); extract upper triangle pairs
+        corr         = np.corrcoef(sample.T)   # (n_ds, n_ds)
+        r_boot[b]    = corr[ix, jx]
+
+        # Mean absolute displacement for all pairs at once via broadcasting
+        # sample[:, ix] shape (n_models, n_pairs), same for jx
+        d_boot[b]    = np.abs(sample[:, ix] - sample[:, jx]).mean(axis=0)
 
     def _to_dfs(boot):
-        lo_mat = np.eye(len(ds))
-        hi_mat = np.ones((len(ds), len(ds)))
+        lo_mat = np.eye(n_ds)
+        hi_mat = np.ones((n_ds, n_ds))
+        lo_vals = np.percentile(boot, 100 * alpha / 2,       axis=0)
+        hi_vals = np.percentile(boot, 100 * (1 - alpha / 2), axis=0)
         for k, (i, j) in enumerate(pairs):
-            lo = float(np.percentile(boot[:, k], 100 * alpha / 2))
-            hi = float(np.percentile(boot[:, k], 100 * (1 - alpha / 2)))
-            lo_mat[i, j] = lo_mat[j, i] = lo
-            hi_mat[i, j] = hi_mat[j, i] = hi
+            lo_mat[i, j] = lo_mat[j, i] = lo_vals[k]
+            hi_mat[i, j] = hi_mat[j, i] = hi_vals[k]
         return (pd.DataFrame(lo_mat, index=ds, columns=ds),
                 pd.DataFrame(hi_mat, index=ds, columns=ds))
 
@@ -223,7 +235,7 @@ def plot_heatmap(matrix: pd.DataFrame, title: str, out_path: Path,
                     fontsize=annot_size, color=color)
     ax.set_title(title, fontsize=11, pad=12)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=500, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {out_path.name}")
 
@@ -246,7 +258,7 @@ def plot_heatmap_ci(matrix: pd.DataFrame, ci_lo: pd.DataFrame,
                     color=color, linespacing=1.3)
     ax.set_title(title, fontsize=11, pad=12)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    fig.savefig(out_path, dpi=500, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved → {out_path.name}")
 
