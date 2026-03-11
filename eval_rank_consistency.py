@@ -15,6 +15,13 @@ Two core views (+ CI variants):
   3. rank_spearman_ci_<metric>.png     Spearman r annotated with [lo, hi].
   4. rank_displacement_ci_<metric>.png Displacement annotated with [lo, hi].
 
+  Additionally, four figures for recognition accuracy are generated from
+  Evaluation/synth_summary.csv and Evaluation/real_summary.csv:
+    rank_spearman_recognition_accuracy.png
+    rank_spearman_ci_recognition_accuracy.png
+    rank_displacement_recognition_accuracy.png
+    rank_displacement_ci_recognition_accuracy.png
+
 Input
 ─────
   Evaluation/biometric_metrics.csv   (produced by eval_biometric.py)
@@ -65,6 +72,10 @@ HIGHER_IS_BETTER = {"TAR@FAR1", "TAR@FAR01"}
 BOOTSTRAP_B      = 10_000
 BOOTSTRAP_SEED   = 42
 
+ACCURACY_METRIC   = "recognition_accuracy"
+SYNTH_SUMMARY_CSV = EVAL_DIR / "synth_summary.csv"
+REAL_SUMMARY_CSV  = EVAL_DIR / "real_summary.csv"
+
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -85,6 +96,30 @@ def load_metrics(path: Path, split_filter: str | None,
     if metric_filter:
         df = df[df["metric"].isin(metric_filter)]
     return df
+
+
+def load_accuracy_metrics(synth_path: Path, real_path: Path) -> pd.DataFrame:
+    """
+    Load recognition accuracy data from synth_summary.csv and real_summary.csv.
+    Each file has columns: model, dataset, accuracy, std.
+    Returns a unified DataFrame with columns: split, model, dataset, metric, value.
+    Rows with NaN accuracy are dropped.
+    """
+    frames = []
+    for path, split in [(real_path, "real"), (synth_path, "synth")]:
+        if not path.exists():
+            print(f"[warn] {path} not found — skipping {split} accuracy data.")
+            continue
+        tmp = pd.read_csv(path)
+        tmp["split"]  = split
+        tmp["metric"] = ACCURACY_METRIC
+        tmp = tmp.rename(columns={"accuracy": "value"})
+        tmp["value"] = pd.to_numeric(tmp["value"], errors="coerce")
+        tmp = tmp.dropna(subset=["value"])
+        frames.append(tmp[["split", "model", "dataset", "metric", "value"]])
+    if not frames:
+        return pd.DataFrame(columns=["split", "model", "dataset", "metric", "value"])
+    return pd.concat(frames, ignore_index=True)
 
 
 def build_ranked(df: pd.DataFrame, metric: str) -> tuple[pd.DataFrame, list[str]]:
@@ -414,6 +449,78 @@ def main() -> None:
             cmap="YlOrRd", vmin=0, vmax=vmax_disp,
             real_rows=real_cols, n_real=n_real,
         )
+
+    # ── Recognition accuracy figures (from summary CSVs) ──────────────────────
+    synth_path = Path(args.out_dir) / "synth_summary.csv"
+    real_path  = Path(args.out_dir) / "real_summary.csv"
+    acc_df = load_accuracy_metrics(synth_path, real_path)
+
+    if not acc_df.empty:
+        ranked_acc, real_cols_acc, n_real_acc = build_ranked(acc_df, ACCURACY_METRIC)
+        if ranked_acc.empty or len(ranked_acc) < 3 or len(ranked_acc.columns) < 2:
+            print(f"\n  [skip] {ACCURACY_METRIC}: insufficient data.")
+        else:
+            n_models_acc   = len(ranked_acc)
+            n_datasets_acc = len(ranked_acc.columns)
+            print(f"\n── {ACCURACY_METRIC}  ({n_models_acc} models x {n_datasets_acc} datasets) ──")
+
+            r_df_acc, p_df_acc = pairwise_spearman(ranked_acc)
+            disp_df_acc        = pairwise_displacement(ranked_acc)
+
+            r_lo_acc = r_hi_acc = d_lo_acc = d_hi_acc = None
+            if do_ci:
+                print(f"  Computing bootstrap CIs (B={args.bootstrap_b:,}) ...")
+                cis_acc          = bootstrap_ci_matrices(ranked_acc, B=args.bootstrap_b)
+                r_lo_acc, r_hi_acc = cis_acc["spearman"]
+                d_lo_acc, d_hi_acc = cis_acc["displacement"]
+
+            all_rows.extend(build_output_rows(
+                ACCURACY_METRIC, r_df_acc, p_df_acc, disp_df_acc,
+                r_lo_acc, r_hi_acc, d_lo_acc, d_hi_acc, n_models_acc))
+
+            if do_plots:
+                vmax_disp_acc = max(1.0, disp_df_acc.values.max())
+                max_rank_acc  = (n_models_acc - 1) / 2
+
+                plot_heatmap(
+                    r_df_acc,
+                    title=(f"Dataset rank correlation (Spearman r) — {ACCURACY_METRIC}\n"
+                           f"{n_models_acc} models  |  r=+1: identical ranking   r=-1: reversed"),
+                    out_path=out_dir / f"rank_spearman_{ACCURACY_METRIC}.png",
+                    cmap="RdBu_r", vmin=-1, vmax=1, fmt=".2f",
+                    real_rows=real_cols_acc, n_real=n_real_acc,
+                )
+
+                plot_heatmap(
+                    disp_df_acc,
+                    title=(f"Mean absolute rank displacement — {ACCURACY_METRIC}\n"
+                           f"Average positions a model shifts between datasets"
+                           f"  (0 = identical,  max \u2248 {max_rank_acc:.0f})"),
+                    out_path=out_dir / f"rank_displacement_{ACCURACY_METRIC}.png",
+                    cmap="YlOrRd", vmin=0, vmax=vmax_disp_acc, fmt=".1f",
+                    real_rows=real_cols_acc, n_real=n_real_acc,
+                )
+
+                if do_ci:
+                    plot_heatmap_ci(
+                        r_df_acc, r_lo_acc, r_hi_acc,
+                        title=(f"Dataset rank correlation (Spearman r) with 95% bootstrap CI"
+                               f" — {ACCURACY_METRIC}\n"
+                               f"{n_models_acc} models  |  B={args.bootstrap_b:,} resamples"),
+                        out_path=out_dir / f"rank_spearman_ci_{ACCURACY_METRIC}.png",
+                        cmap="RdBu_r", vmin=-1, vmax=1,
+                        real_rows=real_cols_acc, n_real=n_real_acc,
+                    )
+
+                    plot_heatmap_ci(
+                        disp_df_acc, d_lo_acc, d_hi_acc,
+                        title=(f"Mean absolute rank displacement with 95% bootstrap CI"
+                               f" — {ACCURACY_METRIC}\n"
+                               f"{n_models_acc} models  |  B={args.bootstrap_b:,} resamples"),
+                        out_path=out_dir / f"rank_displacement_ci_{ACCURACY_METRIC}.png",
+                        cmap="YlOrRd", vmin=0, vmax=vmax_disp_acc,
+                        real_rows=real_cols_acc, n_real=n_real_acc,
+                    )
 
     # Write combined CSV
     if all_rows:
