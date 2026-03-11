@@ -84,11 +84,16 @@ and overal results to:
 
 To evaluate biometric metrics from saved similarity scores run:
 ~~~
+# Checks Pearson coefficient
 python eval_biometric.py
+
+# Checks Spearman coefficient
+python eval_rank_consistency.py  
 ~~~
 
 Output:
 - *Evaluation/biometric_metrics.csv*
+- *Evaluation/rank_stability.csv*
 
 
 ### Demographic Analysis
@@ -97,9 +102,9 @@ We use predictors from [DeepFace](https://github.com/serengil/deepface) to estim
 
 ~~~
 # All datasets
-python Dataset_Demographic_Analysis/demographic_analysis.py
+python demographic_analysis.py
 # Selected dataset
-python Dataset_Demographic_Analysis/demographic_analysis.py --datasets LFW CemiFace
+python demographic_analysis.py --datasets LFW CemiFace
 ~~~
 
 ### Correlation Analysis

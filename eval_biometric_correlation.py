@@ -153,31 +153,77 @@ def bootstrap_ci(
     seed: int = RNG_SEED,
     alpha: float = 0.05,
 ) -> tuple[float, float]:
-    """Non-parametric bootstrap 95% CI for Pearson r."""
+    """Non-parametric bootstrap 95% CI for Pearson r (single pair, vectorised)."""
     mask = np.isfinite(x) & np.isfinite(y)
     xm, ym = x[mask], y[mask]
     n = len(xm)
     if n < 4:
         return np.nan, np.nan
-
-    rng = np.random.default_rng(seed)
-    rs  = np.empty(B)
-    for i in range(B):
-        idx    = rng.integers(0, n, size=n)
-        xs, ys = xm[idx], ym[idx]
-        if xs.std() == 0 or ys.std() == 0:
-            rs[i] = np.nan
-        else:
-            rs[i] = np.corrcoef(xs, ys)[0, 1]
-
-    rs = rs[np.isfinite(rs)]
+    rng  = np.random.default_rng(seed)
+    idx  = rng.integers(0, n, size=(B, n))
+    xs   = xm[idx];  ys = ym[idx]
+    xs  -= xs.mean(axis=1, keepdims=True)
+    ys  -= ys.mean(axis=1, keepdims=True)
+    nx   = np.linalg.norm(xs, axis=1)
+    ny   = np.linalg.norm(ys, axis=1)
+    valid = (nx > 0) & (ny > 0)
+    rs   = np.where(valid, (xs * ys).sum(axis=1) / (nx * ny), np.nan)
+    rs   = rs[np.isfinite(rs)]
     if len(rs) == 0:
         return np.nan, np.nan
-
     return (
         float(np.percentile(rs, 100 * alpha / 2)),
         float(np.percentile(rs, 100 * (1 - alpha / 2))),
     )
+
+
+def bootstrap_ci_batch(
+    pivot:  "pd.DataFrame",
+    pairs:  list,
+    B: int    = BOOTSTRAP_B,
+    seed: int = RNG_SEED,
+    alpha: float = 0.05,
+) -> dict:
+    """
+    Vectorised bootstrap CI for ALL (ds_x, ds_y) pairs in one pass.
+
+    Draws B shared resamples (rows = models), then computes Pearson r for
+    every pair via matrix ops — ~50-100x faster than per-pair loops.
+
+    pivot : model × dataset DataFrame.
+    pairs : list of (ds_x, ds_y) tuples.
+    Returns dict: (ds_x, ds_y) -> (ci_lo, ci_hi).
+    """
+    all_ds  = list(dict.fromkeys(d for p in pairs for d in p))
+    sub     = pivot[all_ds].dropna()
+    n       = len(sub)
+    if n < 4:
+        return {pair: (np.nan, np.nan) for pair in pairs}
+
+    arr      = sub.values.astype(np.float64)          # (n_models, n_ds)
+    col_idx  = {ds: i for i, ds in enumerate(all_ds)}
+    rng      = np.random.default_rng(seed)
+    boot_idx = rng.integers(0, n, size=(B, n))        # (B, n_models)
+    samples  = arr[boot_idx]                           # (B, n_models, n_ds)
+    samples -= samples.mean(axis=1, keepdims=True)     # centre per resample
+    norms    = np.linalg.norm(samples, axis=1)         # (B, n_ds)
+
+    results = {}
+    for ds_x, ds_y in pairs:
+        ix = col_idx[ds_x];  iy = col_idx[ds_y]
+        nx = norms[:, ix];   ny = norms[:, iy]
+        valid = (nx > 0) & (ny > 0)
+        dot   = (samples[:, :, ix] * samples[:, :, iy]).sum(axis=1)
+        rs    = np.where(valid, dot / (nx * ny), np.nan)
+        rs    = rs[np.isfinite(rs)]
+        if len(rs) == 0:
+            results[(ds_x, ds_y)] = (np.nan, np.nan)
+        else:
+            results[(ds_x, ds_y)] = (
+                float(np.percentile(rs, 100 * alpha / 2)),
+                float(np.percentile(rs, 100 * (1 - alpha / 2))),
+            )
+    return results
 
 
 # ── Core computation ──────────────────────────────────────────────────────────
@@ -187,13 +233,16 @@ def compute_ci_table(
     real_datasets: list[str],
     all_datasets:  list[str],
     metric:        str,
+    bootstrap_b:   int = BOOTSTRAP_B,
 ) -> pd.DataFrame:
     """
     Compute Pearson r + CIs for every (real_dataset_x, any_dataset_y) pair.
-    Synth-vs-synth pairs are skipped entirely.
 
     Rows  (dataset_x) = real datasets only.
     Cols  (dataset_y) = real + synth datasets.
+
+    Bootstrap CIs are computed via bootstrap_ci_batch — one shared pass over
+    all pairs instead of B*n_pairs separate bootstrap loops.
     """
     pivot = (
         df[df["dataset"].isin(all_datasets)]
@@ -203,26 +252,29 @@ def compute_ci_table(
         .reindex(columns=all_datasets)
     )
 
-    rows  = []
     pairs = [(x, y) for x in real_datasets for y in all_datasets]
     total = len(pairs)
 
-    for done, (ds_x, ds_y) in enumerate(pairs, 1):
+    # Pearson r + Fisher CI (fast per-pair)
+    pearson = {}
+    for ds_x, ds_y in pairs:
         pair_df = pivot[[ds_x, ds_y]].dropna()
-        n       = len(pair_df)
-
-        x_arr = pair_df.iloc[:, 0].values
-        y_arr = pair_df.iloc[:, 1].values
-
+        n = len(pair_df)
         if n >= 3:
-            r, p = stats.pearsonr(x_arr, y_arr)
-            r = float(r)
-            p = float(p)
+            res = stats.pearsonr(pair_df.iloc[:, 0].values, pair_df.iloc[:, 1].values)
+            pearson[(ds_x, ds_y)] = (float(res.statistic), float(res.pvalue), n)
         else:
-            r, p = np.nan, np.nan
+            pearson[(ds_x, ds_y)] = (np.nan, np.nan, n)
 
+    # Bootstrap CI — one batch for all pairs
+    print(f"  Bootstrap B={bootstrap_b:,} for {total} pairs (batched) ...")
+    boot = bootstrap_ci_batch(pivot, pairs, B=bootstrap_b)
+
+    rows = []
+    for done, (ds_x, ds_y) in enumerate(pairs, 1):
+        r, p, n    = pearson[(ds_x, ds_y)]
         f_lo, f_hi = fisher_ci(r, n)
-        b_lo, b_hi = bootstrap_ci(x_arr, y_arr)
+        b_lo, b_hi = boot[(ds_x, ds_y)]
 
         r_str = f"{r:.3f}" if np.isfinite(r) else "nan"
         f_str = f"[{f_lo:.3f},{f_hi:.3f}]"
@@ -390,10 +442,13 @@ def plot_scatter_grid(
     all_datasets:  list[str],
     metric:        str,
     out_path:      Path,
+    show_ci:       bool = True,
 ) -> None:
     """
     Grid of scatter plots: rows = real datasets, cols = all datasets.
-    One dot per model.  Regression line + r annotation in each panel.
+    One dot per model.  Regression line + r/p annotation in each panel.
+    show_ci=True  also adds bootstrap CI whiskers on the regression annotation.
+    show_ci=False shows only r and p (cleaner, no CI).
     """
     models       = sorted(df["model"].unique())
     n_models     = len(models)
@@ -448,8 +503,14 @@ def plot_scatter_grid(
                 ax.plot(x_line, slope * x_line + intercept,
                         linestyle="--", linewidth=1.1, color="black", alpha=0.55)
                 p_str = f"p={p_val:.3f}" if p_val >= 0.001 else "p<0.001"
+                if show_ci:
+                    b_lo, b_hi = bootstrap_ci(x_arr[mask], y_arr[mask])
+                    ci_str = f"  [{b_lo:.2f},{b_hi:.2f}]" if np.isfinite(b_lo) else ""
+                    annot_txt = f"r={r_val:.3f}{ci_str}\n{p_str}"
+                else:
+                    annot_txt = f"r={r_val:.3f}  {p_str}"
                 ax.annotate(
-                    f"r={r_val:.3f}  {p_str}",
+                    annot_txt,
                     xy=(0.05, 0.93), xycoords="axes fraction",
                     fontsize=7.5, color="black",
                     bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7),
@@ -482,6 +543,256 @@ def plot_scatter_grid(
     print(f"  Saved scatter grid -> {out_path}")
     plt.close(fig)
 
+
+
+# ── Accuracy figure helpers ──────────────────────────────────────────────────
+# Produces three outputs for recognition accuracy (Y=real only, X=real+synth):
+#   biometric_corr_heatmap_accuracy.png        Pearson r heatmap
+#   biometric_corr_heatmap_accuracy_ci.png     same + 95% bootstrap CI
+#   biometric_corr_scatter_accuracy.png        scatter grid with CI annotation
+#   biometric_corr_scatter_accuracy_noci.png   scatter grid without CI
+# No bar chart is produced. Styling matches eval_rank_consistency.py.
+
+REAL_SUMMARY  = EVAL_DIR / "real_summary.csv"
+SYNTH_SUMMARY = EVAL_DIR / "synth_summary.csv"
+
+
+def _load_accuracy_combined(real_path: Path, synth_path: Path) -> "pd.DataFrame | None":
+    frames = []
+    for path, split in [(real_path, "real"), (synth_path, "synth")]:
+        if not path.exists():
+            print(f"  [skip] {path.name} not found.")
+            continue
+        tmp = pd.read_csv(path)
+        tmp["split"]    = split
+        tmp["accuracy"] = pd.to_numeric(tmp["accuracy"], errors="coerce")
+        tmp = tmp.dropna(subset=["accuracy"])
+        frames.append(tmp[["split", "model", "dataset", "accuracy"]])
+    return pd.concat(frames, ignore_index=True) if frames else None
+
+
+def _accuracy_pearson_matrix(df, real_datasets, all_datasets):
+    pivot = (df.groupby(["model", "dataset"])["accuracy"]
+               .mean().unstack("dataset").reindex(columns=all_datasets))
+    rows = []
+    for ds_x in real_datasets:
+        row = {}
+        for ds_y in all_datasets:
+            if ds_x == ds_y:
+                row[ds_y] = 1.0
+            else:
+                pair = pivot[[ds_x, ds_y]].dropna()
+                if len(pair) >= 3:
+                    res = stats.pearsonr(pair[ds_x].values, pair[ds_y].values)
+                    row[ds_y] = res.statistic.item()
+                else:
+                    row[ds_y] = np.nan
+        rows.append(row)
+    return pd.DataFrame(rows, index=real_datasets, columns=all_datasets)
+
+
+def _acc_base_heatmap(matrix, n_real: int):
+    """Sizing / style matching eval_rank_consistency._base_heatmap."""
+    n_rows, n_cols = matrix.shape
+    fig, ax = plt.subplots(figsize=(max(6, n_cols * 0.85) + 2,
+                                    max(4, n_rows * 0.85) + 1))
+    im = ax.imshow(matrix.values.astype(float),
+                   cmap="coolwarm", vmin=-1, vmax=1, aspect="auto")
+    plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02, label="Pearson r")
+    ax.set_xticks(range(n_cols))
+    ax.set_yticks(range(n_rows))
+    ax.set_xticklabels(matrix.columns, rotation=45, ha="right", fontsize=9, color="black")
+    ax.set_yticklabels(matrix.index,   fontsize=9, color="black")
+    ax.tick_params(colors="black")
+    if 0 < n_real < n_cols:
+        ax.axvline(n_real - 0.5, color="black", linewidth=2.0)
+    return fig, ax
+
+
+def _plot_acc_heatmap(r_mat, n_real, title, out_path):
+    fig, ax = _acc_base_heatmap(r_mat, n_real)
+    n_rows, n_cols = r_mat.shape
+    annot_size = max(8, 11 - n_cols // 4)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = r_mat.values[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center",
+                        fontsize=annot_size,
+                        color="white" if abs(v) > 0.55 else "black")
+    ax.set_title(title, fontsize=11, pad=12, color="black")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=500, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved \u2192 {out_path.name}")
+
+
+def _plot_acc_heatmap_ci(r_mat, ci_lo, ci_hi, n_real, title, out_path):
+    fig, ax = _acc_base_heatmap(r_mat, n_real)
+    n_rows, n_cols = r_mat.shape
+    annot_size = max(7, 10 - n_cols // 4)
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v  = r_mat.values[i, j]
+            lo = ci_lo.values[i, j]
+            hi = ci_hi.values[i, j]
+            if np.isfinite(v):
+                ax.text(j, i, f"{v:.2f}\n[{lo:.2f}, {hi:.2f}]",
+                        ha="center", va="center", fontsize=annot_size,
+                        color="white" if abs(v) > 0.55 else "black",
+                        linespacing=1.3)
+    ax.set_title(title, fontsize=11, pad=12, color="black")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=500, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved \u2192 {out_path.name}")
+
+
+def _plot_acc_scatter(df, real_datasets, all_datasets, out_path,
+                      show_ci=True, bootstrap_b=BOOTSTRAP_B):
+    """Scatter grid: rows=real, cols=all. One dot per model, regression line."""
+    models       = sorted(df["model"].unique())
+    n_models     = len(models)
+    model_colors = {m: CMAP(i / max(n_models - 1, 1)) for i, m in enumerate(models)}
+    pivot = (df.groupby(["model", "dataset"])["accuracy"]
+               .mean().unstack("dataset").reindex(columns=all_datasets))
+
+    n_rows, n_cols = len(real_datasets), len(all_datasets)
+    fig, axes = plt.subplots(n_rows, n_cols,
+                             figsize=(4.0 * n_cols, 3.5 * n_rows),
+                             squeeze=False)
+    fig.suptitle("Recognition Accuracy (\u2191 better) \u2014 Dataset Correlations",
+                 fontsize=13, fontweight="bold", color="black")
+
+    for r_idx, ds_x in enumerate(real_datasets):
+        for c_idx, ds_y in enumerate(all_datasets):
+            ax  = axes[r_idx][c_idx]
+            sub = pivot[[ds_x, ds_y]].dropna() if ds_x != ds_y else pivot[[ds_x]].dropna()
+
+            if len(sub) == 0:
+                ax.text(0.5, 0.5, "No common models", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=8, color="black")
+                ax.set_title(f"{ds_x} \u2194 {ds_y}", fontsize=8,
+                             fontweight="bold", color="black")
+                continue
+
+            for model in sub.index:
+                xv = sub.loc[model, ds_x]
+                yv = sub.loc[model, ds_x] if ds_x == ds_y else sub.loc[model, ds_y]
+                ax.scatter(xv, yv, color=model_colors[model], s=36, zorder=3)
+
+            if ds_x != ds_y:
+                x_arr = sub[ds_x].values;  y_arr = sub[ds_y].values
+                mask  = np.isfinite(x_arr) & np.isfinite(y_arr)
+                if mask.sum() >= 3:
+                    slope, intercept, r_val, p_val, _ = stats.linregress(
+                        x_arr[mask], y_arr[mask])
+                    x_line = np.linspace(x_arr[mask].min(), x_arr[mask].max(), 100)
+                    ax.plot(x_line, slope * x_line + intercept,
+                            linestyle="--", linewidth=1.1, color="black", alpha=0.55)
+                    p_str = f"p={p_val:.3f}" if p_val >= 0.001 else "p<0.001"
+                    if show_ci:
+                        b_lo, b_hi = bootstrap_ci(x_arr[mask], y_arr[mask],
+                                                  B=bootstrap_b)
+                        ci_str = f"  [{b_lo:.2f},{b_hi:.2f}]" if np.isfinite(b_lo) else ""
+                        annot  = f"r={r_val:.3f}{ci_str}\n{p_str}"
+                    else:
+                        annot  = f"r={r_val:.3f}  {p_str}"
+                    ax.annotate(annot, xy=(0.05, 0.93), xycoords="axes fraction",
+                                fontsize=7.5, color="black",
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7))
+
+            ax.set_xlabel(f"{ds_x} — Accuracy (%)", fontsize=7.5, color="black")
+            ax.set_ylabel(f"{ds_y} — Accuracy (%)", fontsize=7.5, color="black")
+            ax.set_title(f"{ds_x} \u2194 {ds_y}", fontsize=8,
+                         fontweight="bold", color="black")
+            ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+            ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
+            ax.tick_params(labelsize=6.5, colors="black")
+            ax.grid(True, linestyle=":", alpha=0.4)
+
+    handles = [plt.Line2D([0], [0], marker="o", color="w",
+                          markerfacecolor=model_colors[m], markersize=7, label=m)
+               for m in models]
+    fig.legend(handles=handles, title="Model", loc="lower center",
+               ncol=min(n_models, 4), fontsize=7.5, title_fontsize=8.5,
+               bbox_to_anchor=(0.5, -0.02), labelcolor="black")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved \u2192 {out_path.name}")
+
+
+def generate_accuracy_figures(bootstrap_b: int = BOOTSTRAP_B,
+                               no_scatter: bool = False) -> None:
+    """
+    Produce Pearson r heatmaps + scatter grid for recognition accuracy.
+    Y-axis = real datasets only.  X-axis = real + synth.
+    Bootstrap CIs computed via bootstrap_ci_batch (batched, fast).
+    """
+    print(f"\n{chr(8212) * 60}")
+    print("  Accuracy correlation figures")
+    print(f"{chr(8212) * 60}")
+
+    df = _load_accuracy_combined(REAL_SUMMARY, SYNTH_SUMMARY)
+    if df is None:
+        print("  [skip] No summary CSVs found.")
+        return
+
+    real_datasets  = sorted(df[df["split"] == "real" ]["dataset"].unique())
+    synth_datasets = sorted(df[df["split"] == "synth"]["dataset"].unique())
+    all_datasets   = real_datasets + synth_datasets
+    n_real         = len(real_datasets)
+
+    if len(real_datasets) < 2:
+        print("  [skip] Need at least 2 real datasets.")
+        return
+
+    print(f"  Real  ({n_real}): {real_datasets}")
+    print(f"  Synth ({len(synth_datasets)}): {synth_datasets}")
+
+    r_mat = _accuracy_pearson_matrix(df, real_datasets, all_datasets)
+    _plot_acc_heatmap(
+        r_mat, n_real,
+        title=("Dataset correlation (Pearson r) — Recognition Accuracy\n"
+               "Y: real datasets only   |   X: real + synthetic"),
+        out_path=EVAL_DIR / "biometric_corr_heatmap_accuracy.png",
+    )
+
+    pivot = (df.groupby(["model", "dataset"])["accuracy"]
+               .mean().unstack("dataset").reindex(columns=all_datasets))
+    acc_pairs = [(x, y) for x in real_datasets for y in all_datasets if x != y]
+    print(f"  Bootstrap B={bootstrap_b:,} for {len(acc_pairs)} pairs (batched) ...")
+    boot = bootstrap_ci_batch(pivot, acc_pairs, B=bootstrap_b)
+
+    lo_vals = np.full((n_real, len(all_datasets)), np.nan)
+    hi_vals = np.full((n_real, len(all_datasets)), np.nan)
+    for ci, ds_x in enumerate(real_datasets):
+        for cj, ds_y in enumerate(all_datasets):
+            if ds_x == ds_y:
+                lo_vals[ci, cj] = hi_vals[ci, cj] = 1.0
+            else:
+                lo, hi = boot.get((ds_x, ds_y), (np.nan, np.nan))
+                lo_vals[ci, cj] = lo
+                hi_vals[ci, cj] = hi
+    ci_lo = pd.DataFrame(lo_vals, index=real_datasets, columns=all_datasets)
+    ci_hi = pd.DataFrame(hi_vals, index=real_datasets, columns=all_datasets)
+
+    _plot_acc_heatmap_ci(
+        r_mat, ci_lo, ci_hi, n_real,
+        title=("Dataset correlation (Pearson r) with 95% Bootstrap CI"
+               " — Recognition Accuracy\n"
+               "Y: real datasets only   |   X: real + synthetic"),
+        out_path=EVAL_DIR / "biometric_corr_heatmap_accuracy_ci.png",
+    )
+
+    if not no_scatter:
+        _plot_acc_scatter(df, real_datasets, all_datasets,
+                          out_path=EVAL_DIR / "biometric_corr_scatter_accuracy.png",
+                          show_ci=True, bootstrap_b=bootstrap_b)
+        _plot_acc_scatter(df, real_datasets, all_datasets,
+                          out_path=EVAL_DIR / "biometric_corr_scatter_accuracy_noci.png",
+                          show_ci=False)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -516,17 +827,39 @@ def main() -> None:
         "--recompute", action="store_true",
         help="Ignore cached biometric_corr_<metric>.csv files and recompute everything.",
     )
+    parser.add_argument(
+        "--no-accuracy", action="store_true",
+        help="Skip accuracy bar and heatmap figures from real/synth summary CSVs.",
+    )
     args = parser.parse_args()
 
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ── Try to load cached CSVs first ─────────────────────────────────────────
-    # If all requested metrics have a cached CSV we can skip loading
-    # biometric_metrics.csv entirely (and skip the expensive bootstrap).
+    # ── Try to load biometric_corr_all_metrics.csv first (fastest path) ────────
+    # If it exists and covers all requested metrics, skip everything else
+    # and regenerate figures directly from it.  Use --recompute to bypass.
+    all_metrics_csv = EVAL_DIR / "biometric_corr_all_metrics.csv"
     cached:   dict[str, pd.DataFrame] = {}
     need_raw: list[str] = []
 
-    if not args.recompute:
+    if not args.recompute and all_metrics_csv.exists():
+        _all = pd.read_csv(all_metrics_csv)
+        required_cols = {"metric", "dataset_x", "dataset_y", "n_models",
+                         "r", "p", "fisher_ci_lo", "fisher_ci_hi",
+                         "bootstrap_ci_lo", "bootstrap_ci_hi"}
+        if required_cols.issubset(_all.columns):
+            print(f"  [cache] Loaded {all_metrics_csv.name}")
+            for metric in args.metrics:
+                sub = _all[_all["metric"] == metric]
+                if not sub.empty:
+                    cached[metric] = sub.reset_index(drop=True)
+                else:
+                    need_raw.append(metric)
+        else:
+            print(f"  [warn] {all_metrics_csv.name} missing columns — falling back to per-metric CSVs.")
+            need_raw = list(args.metrics)
+    elif not args.recompute:
+        # Fall back to per-metric CSVs
         for metric in args.metrics:
             safe_metric = metric.replace("@", "_at_")
             csv_path    = EVAL_DIR / f"biometric_corr_{safe_metric}.csv"
@@ -569,11 +902,21 @@ def main() -> None:
         print(f"Bootstrap B = {args.bootstrap_b:,}\n")
 
     elif cached:
-        # Infer dataset lists from cached data
-        sample         = next(iter(cached.values()))
-        real_datasets  = sorted(sample["dataset_x"].unique())
-        all_ds_cached  = sorted(sample["dataset_y"].unique())
-        synth_datasets = [d for d in all_ds_cached if d not in real_datasets]
+        # Load biometric_metrics.csv just to get the real/synth split labels —
+        # we don't need the full data, just the dataset→split mapping.
+        # This is much faster than recomputing CIs and avoids the old-cache
+        # bug where dataset_x contained all datasets instead of real only.
+        _bio = Path(args.input_csv)
+        if _bio.exists():
+            _split_df      = pd.read_csv(_bio, usecols=["split", "dataset"])
+            real_datasets  = sorted(_split_df.loc[_split_df["split"] == "real",  "dataset"].unique())
+            synth_datasets = sorted(_split_df.loc[_split_df["split"] == "synth", "dataset"].unique())
+        else:
+            # Fallback: infer from cached dataset_x/y (may be wrong for old CSVs)
+            sample         = next(iter(cached.values()))
+            real_datasets  = sorted(sample["dataset_x"].unique())
+            all_ds_cached  = sorted(sample["dataset_y"].unique())
+            synth_datasets = [d for d in all_ds_cached if d not in real_datasets]
         print(f"[cache] Real datasets:  {real_datasets}")
         print(f"[cache] Synth datasets: {synth_datasets}")
 
@@ -592,10 +935,11 @@ def main() -> None:
         # ── Get (or compute) the ci_df ────────────────────────────────────
         if metric in cached:
             ci_df    = cached[metric]
-            _real_ds = sorted(ci_df["dataset_x"].unique())
+            _real_ds = real_datasets if real_datasets else sorted(ci_df["dataset_x"].unique())
             _all_ds  = real_datasets + synth_datasets
         else:
-            ci_df    = compute_ci_table(df, real_datasets, all_datasets, metric)
+            ci_df    = compute_ci_table(df, real_datasets, all_datasets, metric,
+                                        bootstrap_b=args.bootstrap_b)
             _real_ds = real_datasets
             _all_ds  = all_datasets
 
@@ -623,17 +967,30 @@ def main() -> None:
                 plot_scatter_grid(
                     df, _real_ds, _all_ds, metric,
                     out_path=EVAL_DIR / f"biometric_corr_scatter_{safe_metric}.png",
+                    show_ci=True,
+                )
+                plot_scatter_grid(
+                    df, _real_ds, _all_ds, metric,
+                    out_path=EVAL_DIR / f"biometric_corr_scatter_{safe_metric}_noci.png",
+                    show_ci=False,
                 )
             else:
                 print("  [skip] Scatter grid requires raw data; use --recompute"
                       " or provide --in to regenerate.")
 
     # ── Combined CSV with all metrics ─────────────────────────────────────────
-    if len(args.metrics) > 1:
+    if len(args.metrics) > 1 and all_ci_rows:
         combined     = pd.concat(all_ci_rows, ignore_index=True)
         combined_out = EVAL_DIR / "biometric_corr_all_metrics.csv"
         combined.to_csv(combined_out, index=False, float_format="%.6f")
         print(f"\nSaved combined CI table -> {combined_out}")
+
+    # ── Accuracy figures ──────────────────────────────────────────────────────
+    if not args.no_accuracy:
+        generate_accuracy_figures(
+            bootstrap_b=args.bootstrap_b,
+            no_scatter=args.no_scatter,
+        )
 
     print("\nDone.")
 

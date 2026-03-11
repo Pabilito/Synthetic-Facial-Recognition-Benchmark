@@ -238,7 +238,7 @@ def _run(cmd: list, dry_run: bool) -> bool:
     print("  $", " ".join(str(c) for c in cmd), flush=True)
     if dry_run:
         return True
-    result = subprocess.run(cmd, check=False)
+    result = subprocess.run(cmd, check=False, cwd=SCRIPT_DIR)
     if result.returncode != 0:
         print(f"\n[ERROR] Command failed (exit {result.returncode}).")
         return False
@@ -393,12 +393,11 @@ def stage_biometric(args, force: bool) -> bool:
     if not force and BIO_METRICS.exists():
         print(f"  [skip] {BIO_METRICS.name} exists.")
         return True
-    if force and BIO_METRICS.exists():
-        BIO_METRICS.unlink()
 
     ok = True
     if REAL_DETAIL.exists() or args.dry_run:
-        ok = _run([sys.executable, "eval_biometric.py", "--real-only", "--overwrite"], args.dry_run)
+        cmd = [sys.executable, "eval_biometric.py", "--real-only"]
+        ok = _run(cmd, args.dry_run)
     if ok and not args.no_synth and (SYNTH_DETAIL.exists() or args.dry_run):
         ok = _run([sys.executable, "eval_biometric.py", "--synth-only"], args.dry_run)
     return ok

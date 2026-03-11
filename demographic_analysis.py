@@ -60,7 +60,7 @@ from deepface import DeepFace
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR = Path(__file__).parent.parent          # project root
+SCRIPT_DIR = Path(__file__).parent          # project root
 REAL_ROOT  = SCRIPT_DIR / "data" / "real"
 SYNTH_ROOT = SCRIPT_DIR / "data" / "synth"
 EVAL_DIR   = SCRIPT_DIR / "Evaluation"
