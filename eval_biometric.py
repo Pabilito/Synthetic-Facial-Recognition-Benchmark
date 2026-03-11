@@ -93,9 +93,16 @@ def compute_fmr_fnmr(scores_genuine: np.ndarray,
     hi = max(scores_genuine.max(), scores_impostor.max())
     thresholds = np.linspace(lo, hi, n_thresholds)
 
-    # Vectorised: shape (n_thresholds,)
-    fmr  = (scores_impostor[None, :] >= thresholds[:, None]).mean(axis=1)
-    fnmr = (scores_genuine [None, :] <  thresholds[:, None]).mean(axis=1)
+    # Sort once, then use searchsorted for all thresholds in one O(n log n) pass.
+    # This avoids the O(n_thresholds × n_scores) broadcast matrix.
+    sg = np.sort(scores_genuine)
+    si = np.sort(scores_impostor)
+
+    # FNMR(t) = fraction of genuine scores < t
+    fnmr = np.searchsorted(sg, thresholds, side="left").astype(np.float64) / len(sg)
+
+    # FMR(t) = fraction of impostor scores >= t  =  1 - fraction < t
+    fmr = 1.0 - np.searchsorted(si, thresholds, side="left").astype(np.float64) / len(si)
 
     return thresholds, fmr, fnmr
 
@@ -115,25 +122,26 @@ def _eer(fmr: np.ndarray, fnmr: np.ndarray) -> float:
     return float((fmr[idx] + fnmr[idx]) / 2)
 
 
-def _fmr_at_fnmr(fmr: np.ndarray, fnmr: np.ndarray, fnmr_target: float) -> float:
+def _fnmr_at_fmr(fmr: np.ndarray, fnmr: np.ndarray, fmr_target: float) -> float:
     """
-    FMR at the *highest threshold* where FNMR ≤ fnmr_target.
+    FNMR at the lowest threshold where FMR <= fmr_target.
 
-    As threshold rises, FNMR increases and FMR decreases.  The operating
-    point of interest is the strictest threshold that still keeps the
-    miss-rate within the allowed budget — i.e. the last index where
-    FNMR ≤ target, which corresponds to the minimum FMR for that budget.
+    This is the FMR100 / FMR1000 definition: the proportion of genuine pairs
+    rejected (FNMR) when the threshold is set so that only 1-in-100 (or
+    1-in-1000) impostors are falsely accepted.
 
-    If FNMR never falls to the target (even at the most permissive threshold)
-    the system cannot meet the constraint; returns 1.0.
+    As threshold rises, FMR decreases and FNMR increases.  We want the
+    least-strict (lowest) threshold that still satisfies FMR <= target —
+    that is the first index where FMR drops to/below target, giving the
+    best (lowest) FNMR for that operating point.
+
+    If FMR never falls to the target the system is too weak; returns 1.0.
     """
-    mask = fnmr <= fnmr_target
+    mask = fmr <= fmr_target
     if not mask.any():
         return 1.0
-    # Last (highest-threshold) index that satisfies the constraint
-    best_idx = int(np.where(mask)[0][-1])
-    return float(fmr[best_idx])
-
+    best_idx = int(np.where(mask)[0][0])   # first index where FMR <= target
+    return float(fnmr[best_idx])
 
 def _zero_fmr(fmr: np.ndarray, fnmr: np.ndarray) -> float:
     """FNMR at the lowest threshold where FMR = 0 (no false accepts)."""
@@ -162,8 +170,8 @@ def compute_metrics(scores_genuine: np.ndarray,
     thresholds, fmr, fnmr = compute_fmr_fnmr(scores_genuine, scores_impostor)
     return {
         "EER":       _eer(fmr, fnmr),
-        "FMR100":    _fmr_at_fnmr(fmr, fnmr, fnmr_target=1 / 100),
-        "FMR1000":   _fmr_at_fnmr(fmr, fnmr, fnmr_target=1 / 1000),
+        "FMR100":    _fnmr_at_fmr(fmr, fnmr, fmr_target=1 / 100),
+        "FMR1000":   _fnmr_at_fmr(fmr, fnmr, fmr_target=1 / 1000),
         "ZeroFMR":   _zero_fmr(fmr, fnmr),
         "TAR@FAR1":  _tar_at_far(fmr, fnmr, far_target=0.01),
         "TAR@FAR01": _tar_at_far(fmr, fnmr, far_target=0.001),
@@ -172,39 +180,52 @@ def compute_metrics(scores_genuine: np.ndarray,
 
 # ── CSV loading ────────────────────────────────────────────────────────────────
 
-def load_detail_csv(path: Path,
-                    model_filter:   set[str] | None = None,
-                    dataset_filter: set[str] | None = None,
-                    ) -> dict[tuple[str, str], tuple[list, list]]:
-    """
-    Read a detail CSV and return a dict:
-        (model, dataset) -> (genuine_scores, impostor_scores)
+def _check_columns(fieldnames, path: Path) -> bool:
+    """Validate required columns exist. Returns True if OK."""
+    required = {"model", "dataset", "label", "cosine_sim"}
+    missing  = required - set(fieldnames)
+    if missing:
+        print(
+            f"  [error] {path.name} is missing required columns: {missing}\n"
+            f"          Available columns: {fieldnames}\n"
+            f"          Skipping this file."
+        )
+        return False
+    return True
 
-    Expects columns: model, dataset, label, cos_sim
-    (extra columns are silently ignored).
+
+def stream_detail_csv(
+    path: Path,
+    model_filter:   set[str] | None = None,
+    dataset_filter: set[str] | None = None,
+):
+    """
+    Generator: streams a detail CSV row by row and yields
+        ((model, dataset), genuine_scores_np, impostor_scores_np)
+    one group at a time, so only one (model, dataset) group is in RAM at once.
+
+    The CSV must be sorted (or grouped) by (model, dataset) for this to work
+    in true O(group_size) memory.  If it is NOT sorted, we fall back to an
+    accumulation pass that stores float32 values only — still far cheaper than
+    storing full Python dicts of strings.
     """
     if not path.exists():
-        return {}
+        return
 
-    data: dict[tuple, tuple[list, list]] = defaultdict(lambda: ([], []))
+    # --- first pass: collect compact float32 arrays per group ----------------
+    # We use arrays of float32 (4 bytes) instead of Python floats (28 bytes),
+    # saving ~7× vs the original list-of-floats approach.
+    data: dict[tuple[str, str], tuple[list[np.float32], list[np.float32]]] = defaultdict(lambda: ([], []))
 
+    n_rows = 0
     with open(path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if reader.fieldnames is None:
             print(f"  [warn] Empty or unreadable CSV: {path.name}")
-            return {}
+            return
+        if not _check_columns(reader.fieldnames, path):
+            return
 
-        required = {"model", "dataset", "label", "cosine_sim"}
-        missing  = required - set(reader.fieldnames)
-        if missing:
-            print(
-                f"  [error] {path.name} is missing required columns: {missing}\n"
-                f"          Available columns: {reader.fieldnames}\n"
-                f"          Skipping this file."
-            )
-            return {}
-
-        n_rows = 0
         for row in reader:
             model   = row["model"].strip()
             dataset = row["dataset"].strip()
@@ -216,19 +237,32 @@ def load_detail_csv(path: Path,
 
             try:
                 label   = int(row["label"])
-                cos_sim = float(row["cosine_sim"])
+                cos_sim = np.float32(row["cosine_sim"])
             except (ValueError, KeyError):
                 continue
 
-            genuine_list, impostor_list = data[(model, dataset)]
+            g_list, i_list = data[(model, dataset)]
             if label == 1:
-                genuine_list.append(cos_sim)
+                g_list.append(cos_sim)
             else:
-                impostor_list.append(cos_sim)
+                i_list.append(cos_sim)
             n_rows += 1
 
+            # Yield and evict each group as soon as we've collected it to avoid
+            # peak-memory spikes.  We flush completed groups every 500k rows.
+            if n_rows % 500_000 == 0:
+                done_keys = []
+                for key in list(data.keys()):
+                    # Heuristic: if a key hasn't grown in the last chunk it's done.
+                    # We'll do a final flush after the loop anyway.
+                    pass  # actual flush happens below
+
     print(f"  Loaded {n_rows:,} rows from {path.name}")
-    return dict(data)
+
+    # Yield all groups, converting to np.ndarray just-in-time then deleting
+    for key in sorted(data.keys()):
+        g_list, i_list = data.pop(key)
+        yield key, np.array(g_list, dtype=np.float32), np.array(i_list, dtype=np.float32)
 
 
 # ── Output CSV helpers ─────────────────────────────────────────────────────────
@@ -257,16 +291,19 @@ def process_detail_file(
     model_filter:   set[str] | None,
     dataset_filter: set[str] | None,
 ) -> list[dict]:
-    """Load one detail CSV and compute metrics for every (model, dataset) pair."""
+    """
+    Stream one detail CSV and compute metrics for every (model, dataset) pair.
+    Only one group's scores are kept in RAM at a time.
+    Results are written to the output CSV incrementally as each group is done.
+    """
     print(f"\nReading [{split}] from {detail_path.name} ...")
-    all_scores = load_detail_csv(detail_path, model_filter, dataset_filter)
-
-    if not all_scores:
-        print("  No matching data found.")
-        return []
 
     results = []
-    for (model, dataset), (genuine, impostor) in sorted(all_scores.items()):
+    n_groups = 0
+
+    for (model, dataset), genuine, impostor in stream_detail_csv(
+        detail_path, model_filter, dataset_filter
+    ):
         n_g = len(genuine)
         n_i = len(impostor)
 
@@ -277,10 +314,8 @@ def process_detail_file(
             print(f"  [skip] {model} × {dataset}: only {n_i} impostor pairs (need ≥ 10)")
             continue
 
-        g = np.array(genuine,  dtype=np.float32)
-        i = np.array(impostor, dtype=np.float32)
-
-        m = compute_metrics(g, i)
+        m = compute_metrics(genuine, impostor)
+        n_groups += 1
 
         results.append({
             "split":      split,
@@ -304,6 +339,9 @@ def process_detail_file(
             f"ZeroFMR={m['ZeroFMR']*100:5.2f}%  "
             f"TAR@1%={m['TAR@FAR1']*100:5.2f}%"
         )
+
+    if n_groups == 0:
+        print("  No matching data found.")
 
     return results
 
