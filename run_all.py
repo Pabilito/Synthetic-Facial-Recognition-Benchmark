@@ -14,7 +14,8 @@ PIPELINE
 
   Stage 2 — eval_biometric.py          EER / FMR100 / FMR1000 / ZeroFMR / TAR
   Stage 3 — eval_biometric_correlation.py   Pearson r + 95% CI
-  Stage 4 — demographic_analysis.py    age / gender  (opt-in, --demographics)
+  Stage 4 — demographic_analysis.py         age / gender
+  Stage 5 — eval_rank_consistency.py        Spearman r + rank displacement
 
 PARALLELISM
 ───────────
@@ -34,6 +35,7 @@ SKIP / RESUME
     Stage 1   skipped per-model as above; full re-run with --force-inference
     Stage 2   skipped if biometric_metrics.csv exists; --force-biometric
     Stage 3   skipped if biometric_corr_*.csv exists; --force-correlation
+    Stage 5   skipped if rank_stability.csv exists
 
 USAGE
 ─────
@@ -43,7 +45,8 @@ USAGE
   python run_all.py --force                # re-run everything from scratch
   python run_all.py --force-inference      # redo stage 1 only
   python run_all.py --force-biometric      # redo stage 2 only
-  python run_all.py --force-correlation    # redo stage 3 only
+  python run_all.py --force-correlation         # redo stage 3 only
+  python run_all.py --rank-consistency           # also run stage 5
   python run_all.py --no-ijb               # skip IJB-B/C
   python run_all.py --no-synth             # skip synthetic datasets
   python run_all.py --no-library-models    # skip edgeface / facenets
@@ -73,6 +76,7 @@ SYNTH_DETAIL = EVAL_DIR / "synth_detail.csv"
 SYNTH_SUMMARY= EVAL_DIR / "synth_summary.csv"
 BIO_METRICS  = EVAL_DIR / "biometric_metrics.csv"
 DEMO_CSV     = EVAL_DIR / "demographics.csv"
+RANK_STAB    = EVAL_DIR / "rank_stability.csv"
 
 # ── CSV schemas (must match eval_utils.py exactly) ────────────────────────────
 
@@ -424,6 +428,23 @@ def stage_demographics(args) -> bool:
     return _run(cmd, args.dry_run)
 
 
+
+def stage_rank_consistency(args) -> bool:
+    _banner("Stage 5 — Rank consistency  (Spearman r + rank displacement)")
+
+    if RANK_STAB.exists():
+        print(f"  [skip] {RANK_STAB.name} exists.")
+        return True
+    if not BIO_METRICS.exists() and not args.dry_run:
+        print(f"  [skip] {BIO_METRICS.name} not found — run stage 2 first.")
+        return True
+
+    cmd = [sys.executable, "eval_rank_consistency.py"]
+    if args.no_synth:
+        cmd += ["--split", "real"]
+    return _run(cmd, args.dry_run)
+
+
 # ── Argument parser (shared by orchestrator and worker) ───────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -438,7 +459,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force-inference",    action="store_true")
     p.add_argument("--force-biometric",    action="store_true")
     p.add_argument("--force-correlation",  action="store_true")
-    p.add_argument("--demographics",       action="store_true")
     p.add_argument("--no-ijb",             action="store_true")
     p.add_argument("--no-synth",           action="store_true")
     p.add_argument("--no-library-models",  action="store_true")
@@ -478,9 +498,11 @@ def main() -> None:
     if not stage_correlation(args, force=args.force or args.force_correlation):
         sys.exit(1)
 
-    if args.demographics:
-        if not stage_demographics(args):
-            sys.exit(1)
+    if not stage_demographics(args):
+        sys.exit(1)
+
+    if not stage_rank_consistency(args):
+        sys.exit(1)
 
     _banner(f"Pipeline complete  ({(time.time()-t0)/60:.1f} min)")
     print(f"  Outputs → {EVAL_DIR}/\n")

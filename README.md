@@ -59,7 +59,7 @@ To re-run the experiments use:
 python run_all.py
 ~~~
 
-Outputs are saved to the *Evaluation/* directory.
+Outputs are saved to the *Evaluation/* directory. It should be able to continue work where it finished it in case of a crash.
 
 ## Step by step execution
 
