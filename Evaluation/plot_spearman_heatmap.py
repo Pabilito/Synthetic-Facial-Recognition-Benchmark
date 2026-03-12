@@ -103,7 +103,7 @@ def main(input_path: str, output_path: str):
         fontsize=14, fontweight="bold",
     )
 
-    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    fig.savefig(output_path, dpi=500, bbox_inches="tight")
     print(f"Saved heatmap to '{output_path}'")
 
 
