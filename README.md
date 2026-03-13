@@ -4,6 +4,10 @@
 
 Reproduction package for TBD
 
+## Supplementary Material
+
+More detailed versions of the figures and tables presented in the paper are available [here](\Evaluation). This directory also stores scripts for data processing.
+
 ## Real Datasets Installation 
 
 You can download LFW, CPLFW, CALFW and AgeDB-30 from kaggle:
@@ -52,7 +56,7 @@ Models trained on synthetic data:
 - [IDiff-Face](https://github.com/fdbtrs/IDiff-Face)
 - Vec2Face, Langevin-Disco, Langevin-Dispersion and HyperFace are loaded from HuggingFace
 
-## Simplified execution
+## Simplified Execution
 To re-run the experiments use: 
 
 ~~~
@@ -61,7 +65,7 @@ python run_all.py
 
 Outputs are saved to the *Evaluation/* directory. It should be able to continue work where it finished it in case of a crash.
 
-## Step by step execution
+## Step by Step Execution
 
 ### Evaluation
 
