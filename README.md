@@ -1,12 +1,6 @@
-# Synthetic Facial Recognition Benchmark
+# Benchmarking Face Recognition without Real Faces - Replication Package
 
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-
-Reproduction package for TBD
-
-## Supplementary Material
-
-More detailed versions of the figures and tables presented in the paper are available [here](\Evaluation). This directory also stores scripts for data processing.
 
 ## Real Datasets Installation 
 
@@ -133,3 +127,7 @@ Outputs:
 - *biometric_corr_<metric>.csv*         
 - *biometric_corr_heatmap_<metric>.png*
 - *biometric_corr_forest_<metric>.png*
+
+## Supplementary Material
+
+More detailed versions of the figures and tables presented in the paper are available [here](\Evaluation). This directory also stores scripts for data processing.
