@@ -1,6 +1,16 @@
 # Benchmarking Face Recognition without Real Faces - Replication Package
 
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![arXiv](https://img.shields.io/badge/arXiv-TBD-b31b1b.svg)](https://arxiv.org/abs/TBD) 
+[![DOI](https://img.shields.io/badge/DOI-TBD/TBD-blue)](https://doi.org/TBD)
+
+Preprint available here: TBD
+
+## Environment
+Experiments were run on python 3.12 with the following dependencies:
+~~~
+pip install -r requirements.txt
+~~~
 
 ## Real Datasets Installation 
 
@@ -92,18 +102,6 @@ python eval_rank_consistency.py
 Output:
 - *Evaluation/biometric_metrics.csv*
 - *Evaluation/rank_stability.csv*
-
-
-### Demographic Analysis
-
-We use predictors from [DeepFace](https://github.com/serengil/deepface) to estimate age and gender of each dataset identity.
-
-~~~
-# All datasets
-python demographic_analysis.py
-# Selected dataset
-python demographic_analysis.py --datasets LFW CemiFace
-~~~
 
 ### Correlation Analysis
 ~~~
