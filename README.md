@@ -1,4 +1,4 @@
-# Benchmarking Face Recognition without Real Faces - Replication Package
+# Benchmarking Face Recognition without Real Faces (IJCB'26)
 
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![arXiv](https://img.shields.io/badge/arXiv-TBD-b31b1b.svg)](https://arxiv.org/abs/TBD) 
