@@ -128,4 +128,4 @@ Outputs:
 
 ## Supplementary Material
 
-More detailed versions of the figures and tables presented in the paper are available [here](\Evaluation). This directory also stores scripts for data processing.
+More detailed versions of the figures and tables presented in the paper are available [here](Evaluation). This directory also stores scripts for data processing.
