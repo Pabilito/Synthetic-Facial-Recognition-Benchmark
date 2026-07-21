@@ -1,18 +1,29 @@
 # Benchmarking Face Recognition without Real Faces (IJCB'26)
 
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-[![arXiv](https://img.shields.io/badge/arXiv-TBD-b31b1b.svg)](https://arxiv.org/abs/TBD) 
+[![arXiv](https://img.shields.io/badge/arXiv-2607.14932-b31b1b.svg)](https://arxiv.org/pdf/2607.14932)
 [![DOI](https://img.shields.io/badge/DOI-TBD/TBD-blue)](https://doi.org/TBD)
 
-Preprint available here: TBD
+Preprint available here: https://arxiv.org/pdf/2607.14932
 
-## Environment
+### Key Findings
+
+- Best synthetic datasets fall within real-benchmark disagreement range.
+- MorphFace and Vec2Face match real benchmarks reliably.
+- Synthetic evaluation now viable without real facial data -> Full privacy-preserving pipeline (training and evaluation) now feasible.
+- Low domain gap necessary but not sufficient for benchmark quality.
+
+Spearman's $\rho$ with 95\% CI represents how strongly 24 models' accuracies ranking is preserved across datasets:
+<img width="8129" height="2341" alt="acc_spearman" src="https://github.com/user-attachments/assets/d130f24a-979b-4163-9401-88eb221812fa" />
+
+## Replication
+### Environment
 Experiments were run on python 3.12 with the following dependencies:
 ~~~
 pip install -r requirements.txt
 ~~~
 
-## Real Datasets Installation 
+### Real Datasets Installation 
 
 You can download LFW, CPLFW, CALFW and AgeDB-30 from kaggle:
 
@@ -22,7 +33,7 @@ kaggle datasets download -d yakhyokhuja/agedb-30-calfw-cplfw-lfw-aligned-112x112
 unzip ~/Downloads/agedb-30-calfw-cplfw-lfw-aligned-112x112.zip -d ~/data/face_datasets/
 ~~~
 
-## Synthetic Datasets Installation 
+### Synthetic Datasets Installation 
 
 Acquire synthetic datasets from their respective owners (sometimes it is a simple download, sometimes you need a permission): 
 - [SFace and SFace2](https://github.com/fdbtrs/SFace-Privacy-friendly-and-Accurate-Face-Recognition-using-Synthetic-Data?tab=readme-ov-file)
@@ -42,14 +53,14 @@ and extract them.
 Some datasets (e.g., Vec2Face, Digi2Real) need additional preprocessing to match common structure of a folder per identity.
 
 
-## Synthetic Datasets Preprocessing
+### Synthetic Datasets Preprocessing
 
 Generate DATASETNAME_ann.txt files with mated and non-mated pairs for evaluation:
 ~~~
 python data/synth/generate_ann.py
 ~~~
 
-## Pretrained Models
+### Pretrained Models
 
 Models trained on real data: 
 - IResNet models are taken from [InsightFace](https://github.com/deepinsight/insightface/tree/master/model_zoo)
@@ -60,7 +71,7 @@ Models trained on synthetic data:
 - [IDiff-Face](https://github.com/fdbtrs/IDiff-Face)
 - Vec2Face, Langevin-Disco, Langevin-Dispersion and HyperFace are loaded from HuggingFace
 
-## Simplified Execution
+### Simplified Execution
 To re-run the experiments use: 
 
 ~~~
@@ -69,9 +80,9 @@ python run_all.py
 
 Outputs are saved to the *Evaluation/* directory. It should be able to continue work where it finished it in case of a crash.
 
-## Step by Step Execution
+### Step by Step Execution
 
-### Evaluation
+#### Evaluation
 
 To use real/synthetic datasets as benchmarks run: 
 ~~~
@@ -103,7 +114,7 @@ Output:
 - *Evaluation/biometric_metrics.csv*
 - *Evaluation/rank_stability.csv*
 
-### Correlation Analysis
+#### Correlation Analysis
 ~~~
 # Aggregated evaluation
 python eval_correlation.py
