@@ -1,10 +1,4 @@
-# Benchmarking Face Recognition without Real Faces (IJCB'26)
-
-[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
-[![arXiv](https://img.shields.io/badge/arXiv-2607.14932-b31b1b.svg)](https://arxiv.org/pdf/2607.14932)
-[![DOI](https://img.shields.io/badge/DOI-TBD/TBD-blue)](https://doi.org/TBD)
-
-Preprint available here: https://arxiv.org/pdf/2607.14932
+# Benchmarking Face Recognition without Real Faces (IJCB'26) [![arXiv](https://img.shields.io/badge/arXiv-2607.14932-b31b1b.svg)](https://arxiv.org/pdf/2607.14932)
 
 ### Key Findings
 
@@ -140,3 +134,16 @@ Outputs:
 ## Supplementary Material
 
 More detailed versions of the figures and tables presented in the paper are available [here](Evaluation). This directory also stores scripts for data processing.
+
+## Citation
+
+If you find our work useful, please cite:
+
+```bibtex
+@article{borsukiewicz2026benchmarking,
+  title={Benchmarking Face Recognition without Real Faces},
+  author={Borsukiewicz, Pawe{\l} and Lunghi, Daniele and Ou{\'e}draogo, Wendk{\^u}uni C and Klein, Jacques and Bissyand{\'e}, Tegawend{\'e} F},
+  journal={arXiv preprint arXiv:2607.14932},
+  year={2026}
+}
+```
